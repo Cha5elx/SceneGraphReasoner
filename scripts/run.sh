@@ -1,0 +1,139 @@
+# 直接跑（前台）
+# CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh
+
+# 后台跑
+# CUDA_VISIBLE_DEVICES=1 setsid bash scripts/run.sh &
+
+# 看日志
+# tail -f outputs/20260513_*/train.log
+
+which_python=$(which python)
+export PYTHONPATH=${PYTHONPATH}:${which_python}:.
+echo "PYTHONPATH: ${PYTHONPATH}"
+
+export MASTER_PORT=$((54000 + $RANDOM % 10000))
+export MASTER_ADDR=localhost
+
+# ========================= 训练参数（直接在这里改） =========================
+epoch=3
+batch_size=8
+lr=5e-6
+
+# ===== Qwen3.5-2B + CLASP =====
+llama_model_path="/data/ZXMIC/mic_lcx/ScaneGraphReasoning/llm/Qwen3.5-2B"
+input_dim=128
+max_obj_num=100
+pc_encoder="clasp"
+segmentor="clasp"
+
+# ===== SGR 场景图 =====
+use_scene_graph="False"
+sg_knn=2
+seq_len_cap=1280
+
+# ===== LoRA =====
+lora_r=64
+lora_alpha=16
+
+# ===== 模块开关 =====
+train_emb=True
+train_img_proj=False
+add_img_token=True
+add_scene_token=False
+no_obj=False
+bidirection=False
+add_pos_emb=False
+feat_fusion=False
+fuse_with_id=False
+use_location_token=False
+different_lr=False
+
+# ===== 训练数据 =====
+# train_tag="scanqa"
+# val_tag="scanqa"
+train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
+val_tag="scanrefer#scanqa#sqa3d#multi3dref#scan2cap"
+
+# ===== 其他 =====
+max_grad_norm=5
+seed=42
+evaluate=False
+pretrained_path=""
+
+# ===== debug / 正常模式 =====
+debug=False
+if [ "$debug" = "True" ]; then
+    enable_wandb=False
+    gpu_num=1
+    do_save=False
+    other_info="debug"
+else
+    enable_wandb=False
+    gpu_num=1
+    do_save=True
+    other_info="sgr"
+fi
+# ========================================================================
+
+tag="${train_tag}__${val_tag}__${other_info}"
+OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
+mkdir -p ${OUTPUT_DIR}
+
+# 把 stdout+stderr 都记录到 OUTPUT_DIR
+exec > >(tee -a "${OUTPUT_DIR}/train.log") 2>&1
+echo "Logging to: ${OUTPUT_DIR}/train.log"
+
+ARGS=(
+    "${config}config.py"
+    output_dir "$OUTPUT_DIR"
+    scheduler.epochs "$epoch"
+    optimizer.lr "$lr"
+    model.add_scene_token "$add_scene_token"
+    model.add_img_token "$add_img_token"
+    pretrained_path "$pretrained_path"
+    evaluate "$evaluate"
+    wandb.enable "$enable_wandb"
+    gpu_num "$gpu_num"
+    do_save "$do_save"
+    batch_size "$batch_size"
+    model.train_emb "$train_emb"
+    model.train_img_proj "$train_img_proj"
+    train_tag "$train_tag"
+    val_tag "$val_tag"
+    model.no_obj "$no_obj"
+    segmentor "$segmentor"
+    pc_encoder "$pc_encoder"
+    model.input_dim "$input_dim"
+    model.bidirection "$bidirection"
+    optimizer.different_lr.enable "$different_lr"
+    model.max_obj_num "$max_obj_num"
+    lora.lora_r "$lora_r"
+    lora.lora_alpha "$lora_alpha"
+    model.add_pos_emb "$add_pos_emb"
+    model.feat_fusion "$feat_fusion"
+    optimizer.max_grad_norm "$max_grad_norm"
+    seed "$seed"
+    model.fuse_with_id "$fuse_with_id"
+    model.llama_model_path "$llama_model_path"
+    model.use_location_token "$use_location_token"
+    model.use_scene_graph "$use_scene_graph"
+    model.sg_knn "$sg_knn"
+    model.seq_len_cap "$seq_len_cap"
+)
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [ "$gpu_num" -gt 1 ]; then
+        devices=$(seq -s, 0 $(($gpu_num - 1)))
+        export CUDA_VISIBLE_DEVICES=$devices
+        echo "Running on $gpu_num GPUs (CUDA_VISIBLE_DEVICES=$devices) with torchrun..."
+        torchrun --nproc_per_node=${gpu_num} --master_port=${MASTER_PORT} tasks/train.py "${ARGS[@]}"
+    else
+        if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+            export CUDA_VISIBLE_DEVICES=0
+            echo "Running on single GPU (CUDA_VISIBLE_DEVICES=0)..."
+        else
+            echo "Running on single GPU (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)..."
+        fi
+        python tasks/train.py "${ARGS[@]}"
+    fi
+fi
