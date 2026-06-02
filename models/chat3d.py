@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from .modeling_llama import LlamaForCausalLM
 from transformers import LlamaTokenizer, AutoTokenizer, AutoModelForCausalLM
 from models.position_embedding import PositionEmbeddingCoordsSine
-from models.scene_graph import SceneGraphBuilder, SceneGraphTokenBuilder
+from models.query_graph_reasoner import QueryGraphReasoner
 from peft import LoraConfig, get_peft_model
 from torch.nn.utils.rnn import pad_sequence
 
@@ -72,9 +72,11 @@ class Chat3D(nn.Module):
 
         # SGR 场景图配置
         self.use_scene_graph = getattr(config.model, 'use_scene_graph', False)
-        self.sg_knn = getattr(config.model, 'sg_knn', 2)
-        self.sg_rel_dim = getattr(config.model, 'sg_rel_dim', 256)
-        self.sg_spatial_dim = getattr(config.model, 'sg_spatial_dim', 128)
+        self.sg_candidate_k = getattr(config.model, 'sg_candidate_k', 6)
+        self.sg_effective_k = getattr(config.model, 'sg_effective_k', 2)
+        self.sg_hidden_dim = getattr(config.model, 'sg_hidden_dim', 128)
+        self.sg_bbox_eps = getattr(config.model, 'sg_bbox_eps', 1e-6)
+        self.sg_hard_prune_eval = getattr(config.model, 'sg_hard_prune_eval', True)
 
         self.debug = config.debug
         if not self.debug:
@@ -182,18 +184,6 @@ class Chat3D(nn.Module):
             self.llama_dim = self.llama_model.config.hidden_size
             logger.info('Loading LLAMA Done')
 
-            if self.use_scene_graph:
-                self.sg_builder = SceneGraphBuilder(
-                    feat_dim=self.input_dim,
-                    rel_dim=self.sg_rel_dim,
-                    spatial_dim=self.sg_spatial_dim,
-                    k=self.sg_knn,
-                )
-                self.sg_token_builder = SceneGraphTokenBuilder(
-                    llama_dim=self.llama_dim,
-                    rel_dim=self.sg_rel_dim,
-                )
-                logger.info(f'SceneGraph builder initialized: k={self.sg_knn}, rel_dim={self.sg_rel_dim}')
         else:
             self.llama_model = None
             self.llama_dim = 4096
@@ -209,6 +199,23 @@ class Chat3D(nn.Module):
             nn.GELU(),
             nn.Linear(self.llama_dim, self.llama_dim)
         )
+        if self.use_scene_graph:
+            self.query_graph_reasoner = QueryGraphReasoner(
+                feat_dim=self.input_dim,
+                query_input_dim=self.llama_dim,
+                output_dim=self.llama_dim,
+                hidden_dim=self.sg_hidden_dim,
+                candidate_k=self.sg_candidate_k,
+                effective_k=self.sg_effective_k,
+                bbox_eps=self.sg_bbox_eps,
+                hard_prune_eval=self.sg_hard_prune_eval,
+            )
+            logger.info(
+                'QueryGraphReasoner initialized: candidate_k=%s, effective_k=%s, hidden_dim=%s',
+                self.sg_candidate_k,
+                self.sg_effective_k,
+                self.sg_hidden_dim,
+            )
         if not self.train_img_proj:
             for p in self.object_img_proj.parameters():
                 p.requires_grad = False
@@ -279,6 +286,35 @@ class Chat3D(nn.Module):
         else:
             embeds = embeds.detach()
         return embeds
+
+    def get_query_token_embeds(self, texts, device):
+        """Tokenize queries once and reuse frozen LLM embeddings for graph routing."""
+        text_tokens = self.llama_tokenizer(
+            list(texts),
+            return_tensors="pt",
+            add_special_tokens=False,
+            padding=True,
+        ).to(device)
+        token_embeds = self.llama_embed_tokens(text_tokens.input_ids).detach()
+        return token_embeds, text_tokens.attention_mask.to(torch.bool)
+
+    def apply_query_graph_reasoning(
+        self, proj_object_embed, object_embed, scene_locs, scene_mask, queries
+    ):
+        """Add query-specific graph evidence to projected 3D object tokens."""
+        if not self.use_scene_graph:
+            return proj_object_embed, None
+        query_token_embeds, query_token_mask = self.get_query_token_embeds(
+            queries, device=object_embed.device
+        )
+        graph_residual, graph_info = self.query_graph_reasoner(
+            scene_feat=object_embed,
+            scene_locs=scene_locs,
+            scene_mask=scene_mask,
+            query_token_embeds=query_token_embeds,
+            query_token_mask=query_token_mask,
+        )
+        return proj_object_embed + graph_residual, graph_info
 
     def encode_object_feat(self, feat, img_feat, locs):
         feat = torch.nn.functional.normalize(feat, dim=-1)
@@ -399,6 +435,10 @@ class Chat3D(nn.Module):
             proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
 
+        proj_object_embed, graph_info = self.apply_query_graph_reasoning(
+            proj_object_embed, object_embed, scene_locs, scene_mask, questions
+        )
+
         proj_scene_embed = None
         if self.add_scene_token:  # remember to change the evaluate
             # if self.add_img_token:
@@ -410,16 +450,6 @@ class Chat3D(nn.Module):
             scene_embed = obj_embed + pos_embed
             scene_embed = self.relation_module(scene_embed, src_key_padding_mask=~scene_mask)
             proj_scene_embed = self.scene_proj(scene_embed)
-
-        # SGR: 构建场景图（固定 KNN）
-        sg_tokens, sg_token_masks = None, None
-        if self.use_scene_graph:
-            sg_rel_feats, sg_edge_indices, sg_edge_masks = self.sg_builder(
-                object_embed, scene_locs, scene_mask
-            )
-            sg_tokens, sg_token_masks = self.sg_token_builder(
-                sg_rel_feats, sg_edge_indices, sg_edge_masks, self.get_objid_embeds()
-            )
 
         input_embed_list, attn_list, target_list = [], [], []
         max_seq_len = 0
@@ -439,10 +469,6 @@ class Chat3D(nn.Module):
                 assigned_ids[i]
             )
             # object_list_embed = nclamp(object_list_embed, min=-0.05, max=0.05)
-            # SGR: 追加场景图关系 token 序列
-            if self.use_scene_graph and sg_token_masks is not None and sg_token_masks[i].any():
-                sample_sg = sg_tokens[i, sg_token_masks[i]]  # [E*3, llama_dim]
-                object_list_embed = torch.cat([object_list_embed, sample_sg], dim=0)
             object_list_intervals.append((p_0_embed.shape[0], p_0_embed.shape[0] + object_list_embed.shape[0]))
             wrapped_embed = torch.cat([p_0_embed, object_list_embed, p_1_embed, prompt_embed], dim=0)
             wrapped_attn = torch.ones(wrapped_embed.size()[:-1], dtype=torch.long).to(wrapped_embed.device)
@@ -507,7 +533,11 @@ class Chat3D(nn.Module):
             obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
             obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
-            scene_norm=sg_rel_feats.norm(dim=-1).mean().detach().cpu() if sg_tokens is not None else 0.,
+            scene_norm=graph_info["residual_norm"].detach().cpu() if graph_info is not None else 0.,
+            graph_nodes=graph_info["valid_node_count"].detach().cpu() if graph_info is not None else 0.,
+            graph_candidate_edges=graph_info["candidate_edge_count"].detach().cpu() if graph_info is not None else 0.,
+            graph_active_edges=graph_info["active_edge_count"].detach().cpu() if graph_info is not None else 0.,
+            graph_edge_score=graph_info["mean_edge_score"].detach().cpu() if graph_info is not None else 0.,
             max_seq_len=max_seq_len
         )
 
@@ -523,6 +553,13 @@ class Chat3D(nn.Module):
             proj_pos_embed = self.pos_proj(pos_embed)
             proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
+        graph_queries = [
+            update_caption(custom_prompt[i], assigned_ids[i])
+            for i in range(batch_size)
+        ]
+        proj_object_embed, _ = self.apply_query_graph_reasoning(
+            proj_object_embed, object_embed, scene_locs, scene_mask, graph_queries
+        )
         if self.add_scene_token:
             # if self.add_img_token:
             #     object_embed = object_embed + object_img_embed
@@ -533,16 +570,6 @@ class Chat3D(nn.Module):
             scene_embed = obj_embed + pos_embed
             scene_embed = self.relation_module(scene_embed, src_key_padding_mask=~scene_mask)
             proj_scene_embed = self.scene_proj(scene_embed)
-
-        # SGR: 构建场景图（固定 KNN）
-        sg_tokens, sg_token_masks = None, None
-        if self.use_scene_graph:
-            sg_rel_feats, sg_edge_indices, sg_edge_masks = self.sg_builder(
-                object_embed, scene_locs, scene_mask
-            )
-            sg_tokens, sg_token_masks = self.sg_token_builder(
-                sg_rel_feats, sg_edge_indices, sg_edge_masks, self.get_objid_embeds()
-            )
 
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
@@ -559,10 +586,6 @@ class Chat3D(nn.Module):
                 obj_ids[i],
                 assigned_ids[i]
             )
-            # SGR: 追加场景图关系 token 序列
-            if self.use_scene_graph and sg_token_masks is not None and sg_token_masks[i].any():
-                sample_sg = sg_tokens[i, sg_token_masks[i]]  # [E*3, llama_dim]
-                object_list_embed = torch.cat([object_list_embed, sample_sg], dim=0)
             object_list_embed = object_list_embed.unsqueeze(0)
             wrapped_embed = torch.cat([p_0_embed, object_list_embed, p_1_embed, prompt_embed], dim=1)
             attention_mask=None

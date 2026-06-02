@@ -147,7 +147,7 @@ model = dict(
     system_path="prompts/system.txt",
     instruction_path="prompts/instruction.txt",
     max_txt_len=128,  # 训练时的最大文本长度（推理链需要更长输出）
-    seq_len_cap=1280,  # LLM 输入序列最大长度（场景图token多，需 > 970）
+    seq_len_cap=1280,  # LLM 输入序列最大长度
     gen_max_txt_len=32,  # 评估时 generate 的最大 token 数（短答案32够用，正式CoT评估用128）
     num_beams=1,       # 验证阶段 beam 数（1=greedy快速验证，正式评估用5）
     end_sym="</s>",
@@ -160,11 +160,13 @@ model = dict(
     scene_dim=256,       # 场景级嵌入
     pos_dim=128,         # 位置编码维度
 
-    # ===== 场景图 (SGR) =====
-    use_scene_graph=True,     # 是否启用场景图模块
-    sg_knn=2,                 # KNN 邻居数
-    sg_rel_dim=256,           # 关系特征维度
-    sg_spatial_dim=128,       # 空间编码维度
+    # ===== Query-conditioned residual graph reasoning (SGR) =====
+    use_scene_graph=False,    # scripts/run.sh 中为图推理实验显式开启
+    sg_candidate_k=6,         # 每个节点的几何候选邻居数
+    sg_effective_k=2,         # 推理时按 query edge score 保留的邻居数
+    sg_hidden_dim=128,
+    sg_bbox_eps=1e-6,         # 零尺寸 bbox 不参与图构建
+    sg_hard_prune_eval=True,  # 训练 soft gating，评估 hard top-k
 
     # ===== 模块开关 =====
     add_scene_token=False,    # SGR使用场景图替代原Transformer场景token

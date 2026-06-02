@@ -30,9 +30,11 @@ max_obj_num=100
 pc_encoder="clasp"
 segmentor="clasp"
 
-# ===== SGR 场景图 =====
-use_scene_graph="False"
-sg_knn=2
+# ===== SGR query-conditioned residual graph =====
+use_scene_graph="True"
+sg_candidate_k=6
+sg_effective_k=2
+sg_hidden_dim=128
 seq_len_cap=1280
 
 # ===== LoRA =====
@@ -123,7 +125,9 @@ ARGS=(
     model.llama_model_path "$llama_model_path"
     model.use_location_token "$use_location_token"
     model.use_scene_graph "$use_scene_graph"
-    model.sg_knn "$sg_knn"
+    model.sg_candidate_k "$sg_candidate_k"
+    model.sg_effective_k "$sg_effective_k"
+    model.sg_hidden_dim "$sg_hidden_dim"
     model.seq_len_cap "$seq_len_cap"
 )
 
