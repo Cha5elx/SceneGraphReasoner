@@ -1,0 +1,39 @@
+# 数据集
+annotations/
+
+# 大数据文件
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+.egg-info/
+
+# 输出
+outputs/
+checkpoints/
+
+# IDE
+.idea/
+.vscode/
+
+# 模型
+llm/
+
+# 日志
+*.log
+
+# 二进制文档
+*.pdf
+*.docx
+*.xlsx
+*.jar
+
+# 上传临时文件
+.uploads/
+=4.51.0
+
+scripts/run.sh
+CLAUDE.md
+AGENTS.md

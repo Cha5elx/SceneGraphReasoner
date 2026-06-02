@@ -3,9 +3,13 @@
 
 # 后台跑
 # CUDA_VISIBLE_DEVICES=1 setsid bash scripts/run.sh &
+# CUDA_VISIBLE_DEVICES=1 setsid bash scripts/run.sh > /dev/null 2> output.log &
 
 # 看日志
 # tail -f outputs/20260513_*/train.log
+
+# killall -9 -u mic_lcx
+# pkill -9 -u mic_lcx
 
 which_python=$(which python)
 export PYTHONPATH=${PYTHONPATH}:${which_python}:.
@@ -15,7 +19,7 @@ export MASTER_PORT=$((54000 + $RANDOM % 10000))
 export MASTER_ADDR=localhost
 
 # ========================= 训练参数（直接在这里改） =========================
-epoch=3
+epoch=1
 batch_size=8
 lr=5e-6
 
@@ -51,8 +55,10 @@ different_lr=False
 # ===== 训练数据 =====
 # train_tag="scanqa"
 # val_tag="scanqa"
-train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
-val_tag="scanrefer#scanqa#sqa3d#multi3dref#scan2cap"
+# train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
+# val_tag="scanrefer#scanqa#sqa3d#multi3dref#scan2cap"
+train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
+val_tag="scanrefer#scanqa"
 
 # ===== 其他 =====
 max_grad_norm=5
@@ -80,11 +86,11 @@ OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}
 
 # 把 stdout+stderr 都记录到 OUTPUT_DIR
-exec > >(tee -a "${OUTPUT_DIR}/train.log") 2>&1
+# exec > >(tee -a "${OUTPUT_DIR}/train.log") 2>&1
 echo "Logging to: ${OUTPUT_DIR}/train.log"
 
 ARGS=(
-    "${config}config.py"
+    "scripts/config.py"
     output_dir "$OUTPUT_DIR"
     scheduler.epochs "$epoch"
     optimizer.lr "$lr"
