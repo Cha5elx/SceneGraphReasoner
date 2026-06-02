@@ -35,6 +35,7 @@ use_scene_graph="True"
 sg_candidate_k=6
 sg_effective_k=2
 sg_hidden_dim=128
+sg_hard_prune_eval=False
 seq_len_cap=1280
 
 # ===== LoRA =====
@@ -128,6 +129,7 @@ ARGS=(
     model.sg_candidate_k "$sg_candidate_k"
     model.sg_effective_k "$sg_effective_k"
     model.sg_hidden_dim "$sg_hidden_dim"
+    model.sg_hard_prune_eval "$sg_hard_prune_eval"
     model.seq_len_cap "$seq_len_cap"
 )
 

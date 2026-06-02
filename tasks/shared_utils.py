@@ -89,7 +89,11 @@ def setup_model(
         logger.info(f"Loaded pretrained image projector from {config.img_projector_path}.")
 
     if osp.isfile(config.pretrained_path):
-        checkpoint = torch.load(config.pretrained_path, map_location="cpu")
+        # Training checkpoints include project metadata such as EasyDict.
+        # PyTorch 2.6 defaults to weights_only=True, which rejects that metadata.
+        checkpoint = torch.load(
+            config.pretrained_path, map_location="cpu", weights_only=False
+        )
         state_dict = checkpoint["model"]
 
         if config.resume:
