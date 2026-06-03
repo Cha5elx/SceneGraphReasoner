@@ -77,6 +77,8 @@ class Chat3D(nn.Module):
         self.sg_hidden_dim = getattr(config.model, 'sg_hidden_dim', 128)
         self.sg_bbox_eps = getattr(config.model, 'sg_bbox_eps', 1e-6)
         self.sg_hard_prune_eval = getattr(config.model, 'sg_hard_prune_eval', True)
+        self.sg_residual_scale = getattr(config.model, 'sg_residual_scale', 1.0)
+        self.sg_use_query_gating = getattr(config.model, 'sg_use_query_gating', True)
 
         self.debug = config.debug
         if not self.debug:
@@ -209,12 +211,16 @@ class Chat3D(nn.Module):
                 effective_k=self.sg_effective_k,
                 bbox_eps=self.sg_bbox_eps,
                 hard_prune_eval=self.sg_hard_prune_eval,
+                residual_scale=self.sg_residual_scale,
+                use_query_gating=self.sg_use_query_gating,
             )
             logger.info(
-                'QueryGraphReasoner initialized: candidate_k=%s, effective_k=%s, hidden_dim=%s',
+                'QueryGraphReasoner initialized: candidate_k=%s, effective_k=%s, hidden_dim=%s, residual_scale=%s, use_query_gating=%s',
                 self.sg_candidate_k,
                 self.sg_effective_k,
                 self.sg_hidden_dim,
+                self.sg_residual_scale,
+                self.sg_use_query_gating,
             )
         if not self.train_img_proj:
             for p in self.object_img_proj.parameters():
@@ -534,10 +540,13 @@ class Chat3D(nn.Module):
             obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
             scene_norm=graph_info["residual_norm"].detach().cpu() if graph_info is not None else 0.,
+            raw_scene_norm=graph_info["raw_residual_norm"].detach().cpu() if graph_info is not None else 0.,
+            graph_residual_scale=graph_info["residual_scale"].detach().cpu() if graph_info is not None else 0.,
             graph_nodes=graph_info["valid_node_count"].detach().cpu() if graph_info is not None else 0.,
             graph_candidate_edges=graph_info["candidate_edge_count"].detach().cpu() if graph_info is not None else 0.,
             graph_active_edges=graph_info["active_edge_count"].detach().cpu() if graph_info is not None else 0.,
             graph_edge_score=graph_info["mean_edge_score"].detach().cpu() if graph_info is not None else 0.,
+            graph_edge_score_std=graph_info["edge_score_std"].detach().cpu() if graph_info is not None else 0.,
             max_seq_len=max_seq_len
         )
 

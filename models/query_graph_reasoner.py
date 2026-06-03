@@ -48,7 +48,7 @@ class QueryGraphReasoner(nn.Module):
         query_token_mask:   [B, T] valid query token mask.
 
     Outputs:
-        graph_residual: [B, N, D_llm] residual added to projected 3D tokens.
+        graph_residual: [B, N, D_llm] scaled residual added to projected 3D tokens.
         graph_info:     tensors for monitoring and later graph visualization.
 
     Zero-size boxes stay available to the baseline LLM object sequence but are
@@ -80,6 +80,8 @@ class QueryGraphReasoner(nn.Module):
         effective_k=2,
         bbox_eps=1e-6,
         hard_prune_eval=True,
+        residual_scale=1.0,
+        use_query_gating=True,
     ):
         super().__init__()
         if candidate_k < 1:
@@ -91,6 +93,8 @@ class QueryGraphReasoner(nn.Module):
         self.effective_k = effective_k
         self.bbox_eps = bbox_eps
         self.hard_prune_eval = hard_prune_eval
+        self.residual_scale = float(residual_scale)
+        self.use_query_gating = use_query_gating
 
         self.query_encoder = QueryEncoder(query_input_dim, hidden_dim)
         self.node_encoder = nn.Sequential(
@@ -149,8 +153,11 @@ class QueryGraphReasoner(nn.Module):
         router_input = torch.cat(
             [source_feats, neighbor_feats, edge_geometry, edge_query], dim=-1
         )
-        edge_scores = torch.sigmoid(self.edge_router(router_input).squeeze(-1))
-        edge_scores = edge_scores * candidate_mask.to(edge_scores.dtype)
+        if self.use_query_gating:
+            edge_scores = torch.sigmoid(self.edge_router(router_input).squeeze(-1))
+            edge_scores = edge_scores * candidate_mask.to(edge_scores.dtype)
+        else:
+            edge_scores = candidate_mask.to(node_feats.dtype)
 
         if hard_prune is None:
             hard_prune = self.hard_prune_eval and not self.training
@@ -170,10 +177,11 @@ class QueryGraphReasoner(nn.Module):
             refined_feats.dtype
         )
 
-        graph_residual = self.residual_proj(F.normalize(refined_feats, dim=-1))
-        graph_residual = graph_residual * graph_node_mask.unsqueeze(-1).to(
-            graph_residual.dtype
+        raw_graph_residual = self.residual_proj(F.normalize(refined_feats, dim=-1))
+        raw_graph_residual = raw_graph_residual * graph_node_mask.unsqueeze(-1).to(
+            raw_graph_residual.dtype
         )
+        graph_residual = raw_graph_residual * self.residual_scale
 
         source_indices = torch.arange(
             obj_num, device=target_indices.device, dtype=torch.long
@@ -184,6 +192,16 @@ class QueryGraphReasoner(nn.Module):
         edge_indices = torch.stack([source_indices, target_indices], dim=-1)
         candidate_edge_count = candidate_mask.sum(dim=(1, 2)).to(edge_scores.dtype)
         active_edge_count = active_edge_mask.sum(dim=(1, 2)).to(edge_scores.dtype)
+        mean_edge_score_per_sample = edge_scores.sum(dim=(1, 2)).div(
+            candidate_edge_count.clamp_min(1)
+        )
+        mean_edge_score = mean_edge_score_per_sample.mean()
+        edge_score_sq_mean = edge_scores.pow(2).sum(dim=(1, 2)).div(
+            candidate_edge_count.clamp_min(1)
+        )
+        edge_score_std = (
+            edge_score_sq_mean - mean_edge_score_per_sample.pow(2)
+        ).clamp_min(0).sqrt().mean()
         graph_info = {
             "node_mask": graph_node_mask,
             "edge_indices": edge_indices,
@@ -193,12 +211,17 @@ class QueryGraphReasoner(nn.Module):
             "edge_weights": edge_weights,
             "query_embed": query_embed,
             "residual_norm": graph_residual.norm(dim=-1).mean(),
+            "raw_residual_norm": raw_graph_residual.norm(dim=-1).mean(),
+            "residual_scale": torch.tensor(
+                self.residual_scale,
+                dtype=graph_residual.dtype,
+                device=graph_residual.device,
+            ),
             "valid_node_count": graph_node_mask.sum(dim=1).float().mean(),
             "candidate_edge_count": candidate_edge_count.mean(),
             "active_edge_count": active_edge_count.mean(),
-            "mean_edge_score": edge_scores.sum(dim=(1, 2)).div(
-                candidate_edge_count.clamp_min(1)
-            ).mean(),
+            "mean_edge_score": mean_edge_score,
+            "edge_score_std": edge_score_std,
         }
         return graph_residual, graph_info
 

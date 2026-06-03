@@ -87,3 +87,52 @@ def test_training_uses_soft_candidate_edges():
     assert torch.equal(
         graph_info["active_edge_mask"], graph_info["candidate_edge_mask"]
     )
+
+
+def test_residual_scale_controls_output_magnitude():
+    reasoner = QueryGraphReasoner(
+        feat_dim=8,
+        query_input_dim=12,
+        output_dim=16,
+        hidden_dim=8,
+        candidate_k=3,
+        effective_k=1,
+        residual_scale=0.25,
+    )
+    with torch.no_grad():
+        reasoner.residual_proj.bias.fill_(1.0)
+
+    residual, graph_info = reasoner(*build_inputs())
+
+    valid_nodes = graph_info["node_mask"]
+    assert torch.allclose(
+        residual[valid_nodes],
+        torch.full_like(residual[valid_nodes], 0.25),
+    )
+    assert torch.count_nonzero(residual[~valid_nodes]) == 0
+    assert torch.isclose(graph_info["residual_scale"], torch.tensor(0.25))
+    assert torch.allclose(
+        graph_info["residual_norm"],
+        graph_info["raw_residual_norm"] * 0.25,
+    )
+
+
+def test_fixed_gnn_ablation_uses_uniform_candidate_scores():
+    reasoner = QueryGraphReasoner(
+        feat_dim=8,
+        query_input_dim=12,
+        output_dim=16,
+        hidden_dim=8,
+        candidate_k=3,
+        effective_k=1,
+        use_query_gating=False,
+    )
+    reasoner.train()
+    _, graph_info = reasoner(*build_inputs())
+
+    assert torch.equal(
+        graph_info["edge_scores"],
+        graph_info["candidate_edge_mask"].to(graph_info["edge_scores"].dtype),
+    )
+    assert torch.isclose(graph_info["mean_edge_score"], torch.tensor(1.0))
+    assert torch.isclose(graph_info["edge_score_std"], torch.tensor(0.0))

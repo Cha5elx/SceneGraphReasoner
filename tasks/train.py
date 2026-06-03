@@ -75,10 +75,13 @@ def train(
         "obj_img_norm",
         "objid_norm",
         "scene_norm",
+        "raw_scene_norm",
+        "graph_residual_scale",
         "graph_nodes",
         "graph_candidate_edges",
         "graph_active_edges",
         "graph_edge_score",
+        "graph_edge_score_std",
     ]
     media_types = get_media_types(train_loaders)
 
