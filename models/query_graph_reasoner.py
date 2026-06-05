@@ -2,8 +2,7 @@
 
 The module keeps graph computation outside the LLM token sequence. It builds a
 small geometric candidate graph online, routes edges with the current query,
-propagates one round of messages, and returns a residual for the projected 3D
-object tokens.
+propagates one round of messages, and returns a residual for 3D object features.
 """
 
 import torch
@@ -38,7 +37,7 @@ class QueryEncoder(nn.Module):
 
 
 class QueryGraphReasoner(nn.Module):
-    """Enhance 3D object tokens with a query-specific sparse evidence graph.
+    """Enhance 3D object features with a query-specific sparse evidence graph.
 
     Inputs:
         scene_feat:         [B, N, D_clasp] normalized CLASP object features.
@@ -48,7 +47,7 @@ class QueryGraphReasoner(nn.Module):
         query_token_mask:   [B, T] valid query token mask.
 
     Outputs:
-        graph_residual: [B, N, D_llm] scaled residual added to projected 3D tokens.
+        graph_residual: [B, N, output_dim] scaled residual added before projection.
         graph_info:     tensors for monitoring and later graph visualization.
 
     Zero-size boxes stay available to the baseline LLM object sequence but are

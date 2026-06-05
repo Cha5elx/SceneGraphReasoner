@@ -205,7 +205,7 @@ class Chat3D(nn.Module):
             self.query_graph_reasoner = QueryGraphReasoner(
                 feat_dim=self.input_dim,
                 query_input_dim=self.llama_dim,
-                output_dim=self.llama_dim,
+                output_dim=self.input_dim,
                 hidden_dim=self.sg_hidden_dim,
                 candidate_k=self.sg_candidate_k,
                 effective_k=self.sg_effective_k,
@@ -305,11 +305,11 @@ class Chat3D(nn.Module):
         return token_embeds, text_tokens.attention_mask.to(torch.bool)
 
     def apply_query_graph_reasoning(
-        self, proj_object_embed, object_embed, scene_locs, scene_mask, queries
+        self, object_embed, scene_locs, scene_mask, queries
     ):
-        """Add query-specific graph evidence to projected 3D object tokens."""
+        """Add query-specific graph evidence before projecting object tokens."""
         if not self.use_scene_graph:
-            return proj_object_embed, None
+            return object_embed, None
         query_token_embeds, query_token_mask = self.get_query_token_embeds(
             queries, device=object_embed.device
         )
@@ -320,7 +320,10 @@ class Chat3D(nn.Module):
             query_token_embeds=query_token_embeds,
             query_token_mask=query_token_mask,
         )
-        return proj_object_embed + graph_residual, graph_info
+        object_embed = torch.nn.functional.normalize(
+            object_embed + graph_residual, dim=-1
+        )
+        return object_embed, graph_info
 
     def encode_object_feat(self, feat, img_feat, locs):
         feat = torch.nn.functional.normalize(feat, dim=-1)
@@ -432,6 +435,9 @@ class Chat3D(nn.Module):
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size = object_embed.shape[0]
+        object_embed, graph_info = self.apply_query_graph_reasoning(
+            object_embed, scene_locs, scene_mask, questions
+        )
         proj_object_embed = self.object_proj(object_embed)
         proj_object_img_embed = self.object_img_proj(object_img_embed)
         if self.add_pos_emb:
@@ -440,10 +446,6 @@ class Chat3D(nn.Module):
             proj_pos_embed = self.pos_proj(pos_embed)
             proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
-
-        proj_object_embed, graph_info = self.apply_query_graph_reasoning(
-            proj_object_embed, object_embed, scene_locs, scene_mask, questions
-        )
 
         proj_scene_embed = None
         if self.add_scene_token:  # remember to change the evaluate
@@ -554,6 +556,13 @@ class Chat3D(nn.Module):
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size, obj_num = object_embed.shape[:2]
+        graph_queries = [
+            update_caption(custom_prompt[i], assigned_ids[i])
+            for i in range(batch_size)
+        ]
+        object_embed, _ = self.apply_query_graph_reasoning(
+            object_embed, scene_locs, scene_mask, graph_queries
+        )
         proj_object_embed = self.object_proj(object_embed)
         proj_object_img_embed = self.object_img_proj(object_img_embed)
         if self.add_pos_emb:
@@ -562,13 +571,6 @@ class Chat3D(nn.Module):
             proj_pos_embed = self.pos_proj(pos_embed)
             proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
-        graph_queries = [
-            update_caption(custom_prompt[i], assigned_ids[i])
-            for i in range(batch_size)
-        ]
-        proj_object_embed, _ = self.apply_query_graph_reasoning(
-            proj_object_embed, object_embed, scene_locs, scene_mask, graph_queries
-        )
         if self.add_scene_token:
             # if self.add_img_token:
             #     object_embed = object_embed + object_img_embed
