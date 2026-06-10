@@ -106,7 +106,10 @@ def create_optimizer(args, model, global_config, filter_bias_and_bn=True):
     opt_lower = args.opt.lower()
     weight_decay = args.weight_decay
     # check for modules that requires different lr
-    lr_multi = global_config.batch_size * global_config.gpu_num
+    gradient_accumulation_steps = int(
+        getattr(global_config.optimizer, "gradient_accumulation_steps", 1)
+    )
+    lr_multi = global_config.batch_size * global_config.gpu_num * gradient_accumulation_steps
     args.lr = args.lr * lr_multi
     if hasattr(args, "different_lr") and args.different_lr.enable:
         diff_lr_module_names = args.different_lr.module_names

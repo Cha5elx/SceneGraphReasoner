@@ -1,5 +1,8 @@
 # ========================= data ==========================
-anno_root = "/data/ZXMIC/mic_lcx/ScaneGraphReasoning/SGR/annotations"
+anno_root = __import__("os").environ.get(
+    "SGR_ANNO_ROOT",
+    "/data/ZXMIC/mic_lcx/ScaneGraphReasoning/SGR/annotations",
+)
 pc_encoder = "clasp"       # CLASP 编码器
 segmentor = "clasp"        # CLASP 分割器
 version = ""
@@ -142,7 +145,10 @@ batch_size = 32
 # ========================= model ==========================
 model = dict(
     # ===== LLM 基座 =====
-    llama_model_path="/data/ZXMIC/mic_lcx/ScaneGraphReasoning/llm/Qwen3.5-2B",
+    llama_model_path=__import__("os").environ.get(
+        "SGR_LLM_PATH",
+        "/data/ZXMIC/mic_lcx/ScaneGraphReasoning/llm/Qwen3.5-2B",
+    ),
     low_resource=False,
     system_path="prompts/system.txt",
     instruction_path="prompts/instruction.txt",
@@ -204,10 +210,11 @@ lora = dict(
 
 optimizer = dict(
     opt="adamW",
-    lr=5e-6,  # LoRA微调级lr，经batch_size×gpu_num缩放后实际≈4e-5
+    lr=5e-6,  # Base LR; scaled by batch_size * gpu_num * gradient_accumulation_steps
     opt_betas=[0.9, 0.999],  # default
     weight_decay=0.02,
     scaler_enable=False,
+    gradient_accumulation_steps=1,
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(

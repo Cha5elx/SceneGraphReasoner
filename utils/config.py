@@ -136,14 +136,14 @@ class Config(object):
                     if "tmp_config" in k:
                         del sys.modules[k]
         elif filepath.endswith((".yml", ".yaml")):
-            cfg_dict = yaml.load(open(filepath, "r"), Loader=yaml.Loader)
+            cfg_dict = yaml.load(open(filepath, "r", encoding="utf-8"), Loader=yaml.Loader)
         elif filepath.endswith(".json"):
-            cfg_dict = json.load(open(filepath, "r"))
+            cfg_dict = json.load(open(filepath, "r", encoding="utf-8"))
         else:
             raise IOError("Only py/yml/yaml/json type are supported now!")
 
         cfg_text = filepath + "\n"
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             cfg_text += f.read()
 
         if BASE_KEY in cfg_dict:  # load configs in `BASE_KEY`

@@ -1,41 +1,40 @@
-# 数据集
+# Data and model artifacts
 annotations/
-
-# 大数据文件
+llm/
 *.pt
 *.pth
+
+# Outputs and checkpoints
+outputs/
+checkpoints/
+*.log
+
+# Local machine/run configuration
+.env
+.env.*
+scripts/*.local.sh
+
+# Local agent/planning notes
+AGENTS.md
+CLAUDE.md
+docs/plans/
 
 # Python
 __pycache__/
 *.pyc
-.egg-info/
-
-# 输出
-outputs/
-checkpoints/
+*.pyo
+*.egg-info/
+.pytest_cache/
 
 # IDE
 .idea/
 .vscode/
 
-# 模型
-llm/
-
-# 日志
-*.log
-
-# 二进制文档
+# Binary documents
 *.pdf
 *.docx
 *.xlsx
 *.jar
 
-# 上传临时文件
+# Upload/temp files
 .uploads/
-=4.51.0
-
-scripts/run.sh
-CLAUDE.md
-AGENTS.md
-*.md
-scripts/run.sh

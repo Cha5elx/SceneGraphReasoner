@@ -104,11 +104,19 @@ def train(
             d.sampler.set_epoch(epoch)
     train_loader = MetaLoader(name2loader=dict(list(zip(media_types, train_loaders))))
 
-    accum_iter = 1
-    eval_freq = getattr(config, 'eval_freq', 0) or len(train_loader)
+    accum_iter = int(getattr(config.optimizer, "gradient_accumulation_steps", 1))
+    if accum_iter < 1:
+        raise ValueError("optimizer.gradient_accumulation_steps must be >= 1")
+    update_steps_per_epoch = (len(train_loader) + accum_iter - 1) // accum_iter
+    eval_freq = getattr(config, 'eval_freq', 0) or update_steps_per_epoch
+    logger.info(
+        f"gradient_accumulation_steps={accum_iter}, "
+        f"update_steps_per_epoch={update_steps_per_epoch}"
+    )
 
     optimizer.zero_grad()
     iterator = metric_logger.log_every(train_loader, log_freq, header)
+    update_step = 0
     for i, (media_type, batch) in enumerate(iterator):
         for k in batch.keys():
             if type(batch[k]) == torch.Tensor:
@@ -118,14 +126,17 @@ def train(
         
         scaler.scale(loss).backward()
 
-        if ((i + 1) % accum_iter == 0) or (i + 1 == len(train_loader)):
+        is_update_step = ((i + 1) % accum_iter == 0) or (i + 1 == len(train_loader))
+        if is_update_step:
             if config.optimizer.max_grad_norm > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.optimizer.max_grad_norm)
             scaler.step(optimizer)
             optimizer.zero_grad()
             scaler.update()
-        scheduler.step()
+            scheduler.step()
+            update_step += 1
+            global_step += 1
 
         # logging
         for name in loss_names:
@@ -136,13 +147,19 @@ def train(
             metric_logger.update(**{f"{name}": value})
         metric_logger.update(lr=optimizer.param_groups[-1]["lr"])
 
-        if is_main_process() and config.wandb.enable and global_step % log_freq == 0:
+        if is_update_step and is_main_process() and config.wandb.enable and global_step % log_freq == 0:
             logs = metric_logger.get_avg_dict()
             log_dict_to_wandb(logs, step=global_step, prefix="train/")
 
-        global_step += 1
+        should_eval = False
+        if is_update_step and do_eval:
+            remaining_update_steps = update_steps_per_epoch - update_step
+            should_eval = (
+                (update_step % eval_freq == 0 and remaining_update_steps >= eval_freq)
+                or i == len(train_loader) - 1
+            )
 
-        if do_eval and ((i+1) % eval_freq == 0 and (len(train_loader) - i >= eval_freq) or i == len(train_loader) - 1):
+        if should_eval:
             # 先保存 ckpt，防止评估报错导致权重丢失
             if is_main_process() and config.do_save and not config.debug:
                 param_grad_dic = {
@@ -379,7 +396,11 @@ def main(config):
 
     train_loaders, val_loaders = setup_dataloaders(config)
 
-    num_steps_per_epoch = sum(len(d) for d in train_loaders)
+    accum_iter = int(getattr(config.optimizer, "gradient_accumulation_steps", 1))
+    if accum_iter < 1:
+        raise ValueError("optimizer.gradient_accumulation_steps must be >= 1")
+    num_batches_per_epoch = sum(len(d) for d in train_loaders)
+    num_steps_per_epoch = (num_batches_per_epoch + accum_iter - 1) // accum_iter
     config.scheduler.num_training_steps = num_steps_per_epoch * config.scheduler.epochs
     config.scheduler.num_warmup_steps = num_steps_per_epoch * config.scheduler.warmup_epochs
     torch.backends.cudnn.benchmark = True
