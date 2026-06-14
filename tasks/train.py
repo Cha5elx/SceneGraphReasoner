@@ -49,6 +49,25 @@ scorers = [
 max_global_step = 200000000
 
 
+INFERENCE_STATE_PREFIXES = (
+    "object_img_proj.",
+)
+
+
+def get_checkpoint_state_dict(model_without_ddp):
+    param_grad_dic = {
+        k: v.requires_grad for (k, v) in model_without_ddp.named_parameters()
+    }
+    state_dict = model_without_ddp.state_dict()
+    for k in list(state_dict.keys()):
+        keep_for_inference = any(
+            k.startswith(prefix) for prefix in INFERENCE_STATE_PREFIXES
+        )
+        if k in param_grad_dic.keys() and not param_grad_dic[k] and not keep_for_inference:
+            del state_dict[k]
+    return state_dict
+
+
 def train(
     model,
     model_without_ddp,
@@ -162,13 +181,7 @@ def train(
         if should_eval:
             # 先保存 ckpt，防止评估报错导致权重丢失
             if is_main_process() and config.do_save and not config.debug:
-                param_grad_dic = {
-                    k: v.requires_grad for (k, v) in model_without_ddp.named_parameters()
-                }
-                state_dict = model_without_ddp.state_dict()
-                for k in list(state_dict.keys()):
-                    if k in param_grad_dic.keys() and not param_grad_dic[k]:
-                        del state_dict[k]
+                state_dict = get_checkpoint_state_dict(model_without_ddp)
                 save_obj = {
                     "model": state_dict,
                     "config": config,
@@ -442,14 +455,7 @@ def main(config):
             )
             if is_main_process():
                 logger.info(f"Epoch {epoch}")
-                param_grad_dic = {
-                    k: v.requires_grad for (k, v) in model_without_ddp.named_parameters()
-                }
-                state_dict = model_without_ddp.state_dict()
-                for k in list(state_dict.keys()):
-                    if k in param_grad_dic.keys() and not param_grad_dic[k]:
-                        # delete parameters that do not require gradient
-                        del state_dict[k]
+                state_dict = get_checkpoint_state_dict(model_without_ddp)
                 save_obj = {
                     "model": state_dict,
                     # "optimizer": optimizer.state_dict(),

@@ -75,7 +75,7 @@ class BaseDataset(Dataset):
             scene_masks[scan_id] = scene_mask
         return scene_feats, scene_img_feats, scene_masks
 
-    def get_anno(self, index):
+    def get_anno(self, index, random_assign=True):
         scene_id = self.anno[index]["scene_id"]
         if self.attributes is not None:
             scene_attr = self.attributes[scene_id]
@@ -88,9 +88,12 @@ class BaseDataset(Dataset):
             scene_feat = scene_feat.unsqueeze(0)
         scene_img_feat = self.scene_img_feats[scene_id] if self.scene_img_feats is not None else torch.zeros((scene_feat.shape[0], self.img_feat_dim))
         scene_mask = self.scene_masks[scene_id] if self.scene_masks is not None else torch.ones(scene_feat.shape[0], dtype=torch.int)
-        # assigned_ids = torch.randperm(self.max_obj_num)[:len(scene_locs)]
-        # assigned_ids = torch.randperm(len(scene_locs))
-        assigned_ids = torch.randperm(self.max_obj_num) # !!!
+        # Training uses random object-token remapping as augmentation.
+        # Validation/eval should use a fixed mapping so checkpoint reloads are reproducible.
+        if random_assign:
+            assigned_ids = torch.randperm(self.max_obj_num)
+        else:
+            assigned_ids = torch.arange(self.max_obj_num)
         return scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids
     
 

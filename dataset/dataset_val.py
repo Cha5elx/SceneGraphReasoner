@@ -7,7 +7,6 @@ import torch
 
 from dataset.base_dataset import BaseDataset, update_caption
 import glob
-import random
 from prompts.prompts import obj_caption_wid_prompt
 from torch.nn.utils.rnn import pad_sequence
 
@@ -53,7 +52,7 @@ class ValDataset(BaseDataset):
         return len(self.anno)
 
     def __getitem__(self, index):
-        scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids = self.get_anno(index)
+        scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids = self.get_anno(index, random_assign=False)
         obj_id = int(self.anno[index].get('obj_id', 0))
         pred_id = int(self.anno[index].get('pred_id', 0))
         type_info = int(self.anno[index].get('sqa_type', 0))
@@ -64,7 +63,7 @@ class ValDataset(BaseDataset):
         elif 'type_info' in self.anno[index]:
             type_info = self.anno[index]['type_info']
         if 'prompt' not in self.anno[index]:
-            prompt = random.choice(obj_caption_wid_prompt).replace('<id>', f"<OBJ{obj_id:03}>")
+            prompt = obj_caption_wid_prompt[0].replace('<id>', f"<OBJ{obj_id:03}>")
         else:
             prompt = self.anno[index]["prompt"]
         ref_captions = self.anno[index]["ref_captions"].copy() if "ref_captions" in self.anno[index] else []
