@@ -50,7 +50,19 @@ max_global_step = 200000000
 
 
 INFERENCE_STATE_PREFIXES = (
+    "object_proj.",
     "object_img_proj.",
+    "pos_proj.",
+    "query_graph_reasoner.",
+)
+
+INFERENCE_STATE_SUBSTRINGS = (
+    ".lora_A.",
+    ".lora_B.",
+    ".lora_embedding_A",
+    ".lora_embedding_B",
+    "embed_tokens.weight",
+    "lm_head.weight",
 )
 
 
@@ -62,6 +74,8 @@ def get_checkpoint_state_dict(model_without_ddp):
     for k in list(state_dict.keys()):
         keep_for_inference = any(
             k.startswith(prefix) for prefix in INFERENCE_STATE_PREFIXES
+        ) or any(
+            substring in k for substring in INFERENCE_STATE_SUBSTRINGS
         )
         if k in param_grad_dic.keys() and not param_grad_dic[k] and not keep_for_inference:
             del state_dict[k]

@@ -74,6 +74,7 @@ lora_alpha=${lora_alpha:-16}
 # ===== 模块开关 =====
 train_emb=${train_emb:-True}
 train_img_proj=${train_img_proj:-False}
+train_graph_only=${train_graph_only:-False}
 add_img_token=${add_img_token:-True}
 add_scene_token=${add_scene_token:-False}
 no_obj=${no_obj:-False}
@@ -141,6 +142,7 @@ ARGS=(
     optimizer.gradient_accumulation_steps "$gradient_accumulation_steps"
     model.train_emb "$train_emb"
     model.train_img_proj "$train_img_proj"
+    model.train_graph_only "$train_graph_only"
     train_tag "$train_tag"
     val_tag "$val_tag"
     model.no_obj "$no_obj"

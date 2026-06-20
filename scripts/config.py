@@ -182,6 +182,7 @@ model = dict(
     use_lora=True,
     train_emb=True,
     train_img_proj=False,
+    train_graph_only=False,   # True = freeze everything except query_graph_reasoner
     no_obj=False,
     max_obj_num=100,          # CLASP 固定 100 个物体
     bidirection=False,

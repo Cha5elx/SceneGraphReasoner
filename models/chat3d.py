@@ -58,6 +58,7 @@ class Chat3D(nn.Module):
         self.add_img_token = config.model.add_img_token
         self.train_emb = config.model.train_emb
         self.train_img_proj = config.model.train_img_proj
+        self.train_graph_only = getattr(config.model, 'train_graph_only', False)
         self.input_dim = config.model.input_dim    # CLASP: 128
         self.img_input_dim = config.model.img_input_dim
         self.attr_dim = config.model.attr_dim
@@ -79,6 +80,8 @@ class Chat3D(nn.Module):
         self.sg_hard_prune_eval = getattr(config.model, 'sg_hard_prune_eval', True)
         self.sg_residual_scale = getattr(config.model, 'sg_residual_scale', 1.0)
         self.sg_use_query_gating = getattr(config.model, 'sg_use_query_gating', True)
+        if self.train_graph_only and not self.use_scene_graph:
+            raise ValueError("model.train_graph_only=True requires model.use_scene_graph=True")
 
         self.debug = config.debug
         if not self.debug:
@@ -229,6 +232,8 @@ class Chat3D(nn.Module):
         self.pos_proj = nn.Sequential(
             nn.Linear(self.pos_dim, self.llama_dim)
         )
+        if self.train_graph_only:
+            self.freeze_non_graph_parameters()
         # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
         # self.relation_module = nn.TransformerEncoder(self.encoder_layer, num_layers=config.model.encoder_num_layers)
         # self.scene_init_proj = nn.Sequential(
@@ -259,6 +264,36 @@ class Chat3D(nn.Module):
         self.last_embed = None
         
         # print_grad_status(self)
+
+    def freeze_non_graph_parameters(self):
+        if not self.use_scene_graph or not hasattr(self, "query_graph_reasoner"):
+            raise ValueError("train_graph_only requires an initialized query_graph_reasoner")
+        for param in self.parameters():
+            param.requires_grad = False
+        for param in self.query_graph_reasoner.parameters():
+            param.requires_grad = True
+
+        trainable_params = sum(
+            p.numel() for p in self.query_graph_reasoner.parameters() if p.requires_grad
+        )
+        logger.info(
+            "train_graph_only=True: froze all parameters except query_graph_reasoner "
+            "(trainable_params=%s)",
+            trainable_params,
+        )
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and getattr(self, "train_graph_only", False):
+            if self.llama_model is not None:
+                self.llama_model.eval()
+            self.object_proj.eval()
+            self.object_img_proj.eval()
+            self.pos_embedding.eval()
+            self.pos_proj.eval()
+            if hasattr(self, "query_graph_reasoner"):
+                self.query_graph_reasoner.train(True)
+        return self
 
     def get_objid_embeds(self):
         if self.config.model.use_lora:
