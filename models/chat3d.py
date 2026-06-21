@@ -285,8 +285,9 @@ class Chat3D(nn.Module):
     def train(self, mode=True):
         super().train(mode)
         if mode and getattr(self, "train_graph_only", False):
-            if self.llama_model is not None:
-                self.llama_model.eval()
+            # Keep the frozen LLM in train mode: Qwen only applies gradient
+            # checkpointing when module.training is True, and graph-only still
+            # needs gradients through the LLM back to object tokens.
             self.object_proj.eval()
             self.object_img_proj.eval()
             self.pos_embedding.eval()
