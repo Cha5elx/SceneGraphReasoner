@@ -80,6 +80,7 @@ class Chat3D(nn.Module):
         self.sg_hard_prune_eval = getattr(config.model, 'sg_hard_prune_eval', True)
         self.sg_residual_scale = getattr(config.model, 'sg_residual_scale', 1.0)
         self.sg_use_query_gating = getattr(config.model, 'sg_use_query_gating', True)
+        self.sg_diagnostics = getattr(config.model, 'sg_diagnostics', True)
         if self.train_graph_only and not self.use_scene_graph:
             raise ValueError("model.train_graph_only=True requires model.use_scene_graph=True")
 
@@ -216,6 +217,7 @@ class Chat3D(nn.Module):
                 hard_prune_eval=self.sg_hard_prune_eval,
                 residual_scale=self.sg_residual_scale,
                 use_query_gating=self.sg_use_query_gating,
+                diagnostics=self.sg_diagnostics,
             )
             logger.info(
                 'QueryGraphReasoner initialized: candidate_k=%s, effective_k=%s, hidden_dim=%s, residual_scale=%s, use_query_gating=%s',
@@ -344,7 +346,7 @@ class Chat3D(nn.Module):
         self, object_embed, scene_locs, scene_mask, queries
     ):
         """Add query-specific graph evidence before projecting object tokens."""
-        if not self.use_scene_graph:
+        if not self.use_scene_graph or self.sg_residual_scale == 0:
             return object_embed, None
         query_token_embeds, query_token_mask = self.get_query_token_embeds(
             queries, device=object_embed.device
@@ -585,6 +587,13 @@ class Chat3D(nn.Module):
             graph_active_edges=graph_info["active_edge_count"].detach().cpu() if graph_info is not None else 0.,
             graph_edge_score=graph_info["mean_edge_score"].detach().cpu() if graph_info is not None else 0.,
             graph_edge_score_std=graph_info["edge_score_std"].detach().cpu() if graph_info is not None else 0.,
+            graph_edge_score_min=graph_info["edge_score_min"].detach().cpu() if graph_info is not None else 0.,
+            graph_edge_score_max=graph_info["edge_score_max"].detach().cpu() if graph_info is not None else 0.,
+            graph_edge_score_range=graph_info["edge_score_range"].detach().cpu() if graph_info is not None else 0.,
+            graph_edge_top1_margin=graph_info["edge_top1_margin"].detach().cpu() if graph_info is not None else 0.,
+            graph_query_score_delta=graph_info["query_score_delta"].detach().cpu() if graph_info is not None else 0.,
+            graph_query_top1_change=graph_info["query_top1_change"].detach().cpu() if graph_info is not None else 0.,
+            graph_query_topk_overlap=graph_info["query_topk_overlap"].detach().cpu() if graph_info is not None else 0.,
             max_seq_len=max_seq_len
         )
 

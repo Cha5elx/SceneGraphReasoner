@@ -65,6 +65,7 @@ sg_hidden_dim=${sg_hidden_dim:-128}
 sg_hard_prune_eval=${sg_hard_prune_eval:-False}
 sg_residual_scale=${sg_residual_scale:-0.1}
 sg_use_query_gating=${sg_use_query_gating:-True}
+sg_diagnostics=${sg_diagnostics:-True}
 seq_len_cap=${seq_len_cap:-1280}
 
 # ===== LoRA =====
@@ -168,6 +169,7 @@ ARGS=(
     model.sg_hard_prune_eval "$sg_hard_prune_eval"
     model.sg_residual_scale "$sg_residual_scale"
     model.sg_use_query_gating "$sg_use_query_gating"
+    model.sg_diagnostics "$sg_diagnostics"
     model.seq_len_cap "$seq_len_cap"
 )
 

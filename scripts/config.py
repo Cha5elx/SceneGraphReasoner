@@ -175,6 +175,7 @@ model = dict(
     sg_hard_prune_eval=True,  # 训练 soft gating，评估 hard top-k
     sg_residual_scale=1.0,    # scale graph residual before adding to object tokens
     sg_use_query_gating=True, # False = fixed GNN ablation
+    sg_diagnostics=True,      # log query sensitivity and edge ranking diagnostics
 
     # ===== 模块开关 =====
     add_scene_token=False,    # SGR使用场景图替代原Transformer场景token

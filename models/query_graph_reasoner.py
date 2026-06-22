@@ -81,6 +81,7 @@ class QueryGraphReasoner(nn.Module):
         hard_prune_eval=True,
         residual_scale=1.0,
         use_query_gating=True,
+        diagnostics=True,
     ):
         super().__init__()
         if candidate_k < 1:
@@ -94,6 +95,7 @@ class QueryGraphReasoner(nn.Module):
         self.hard_prune_eval = hard_prune_eval
         self.residual_scale = float(residual_scale)
         self.use_query_gating = use_query_gating
+        self.diagnostics = diagnostics
 
         self.query_encoder = QueryEncoder(query_input_dim, hidden_dim)
         self.node_encoder = nn.Sequential(
@@ -300,6 +302,15 @@ class QueryGraphReasoner(nn.Module):
             edge_score_sq_mean - mean_edge_score_per_sample.pow(2)
         ).clamp_min(0).sqrt().mean()
 
+        edge_diagnostics = self._compute_edge_diagnostics(
+            edge_scores=edge_scores,
+            candidate_mask=candidate_mask,
+            source_feats=source_feats,
+            neighbor_feats=neighbor_feats,
+            edge_geometry=edge_geometry,
+            query_embed=query_embed,
+        )
+
         # graph_info 不参与主前向输出的 object feature 加法，主要用于:
         # 1) 训练日志监控；
         # 2) 分析/可视化 query-conditioned 边选择；
@@ -340,9 +351,124 @@ class QueryGraphReasoner(nn.Module):
             # 边分数标准差。
             "edge_score_std": edge_score_std,
         }
+        graph_info.update(edge_diagnostics)
 
         # 返回给 Chat3D 的只有 graph_residual；graph_info 作为日志/可视化辅助信息。
         return graph_residual, graph_info
+
+    def _compute_edge_diagnostics(
+        self,
+        edge_scores,
+        candidate_mask,
+        source_feats,
+        neighbor_feats,
+        edge_geometry,
+        query_embed,
+    ):
+        zero = edge_scores.new_tensor(0.0)
+        valid_count = candidate_mask.sum(dim=(1, 2)).to(edge_scores.dtype)
+        has_valid_sample = valid_count > 0
+        if not has_valid_sample.any():
+            return {
+                "edge_score_min": zero,
+                "edge_score_max": zero,
+                "edge_score_range": zero,
+                "edge_top1_margin": zero,
+                "query_score_delta": zero,
+                "query_top1_change": zero,
+                "query_topk_overlap": zero,
+            }
+
+        masked_min_scores = edge_scores.masked_fill(~candidate_mask, float("inf"))
+        masked_max_scores = edge_scores.masked_fill(~candidate_mask, float("-inf"))
+        edge_score_min = masked_min_scores.amin(dim=(1, 2))
+        edge_score_max = masked_max_scores.amax(dim=(1, 2))
+        edge_score_min = edge_score_min.masked_fill(~has_valid_sample, 0).mean()
+        edge_score_max = edge_score_max.masked_fill(~has_valid_sample, 0).mean()
+        edge_score_range = edge_score_max - edge_score_min
+
+        edge_top1_margin = self._compute_top1_margin(edge_scores, candidate_mask)
+        query_score_delta = zero
+        query_top1_change = zero
+        query_topk_overlap = zero
+
+        if self.diagnostics and self.use_query_gating and edge_scores.shape[0] > 1:
+            with torch.no_grad():
+                shuffled_query = query_embed.roll(shifts=1, dims=0)
+                _, obj_num, edge_num, _ = source_feats.shape
+                shuffled_query = shuffled_query[:, None, None, :].expand(
+                    -1, obj_num, edge_num, -1
+                )
+                shuffled_router_input = torch.cat(
+                    [source_feats, neighbor_feats, edge_geometry, shuffled_query],
+                    dim=-1,
+                )
+                shuffled_scores = torch.sigmoid(
+                    self.edge_router(shuffled_router_input).squeeze(-1)
+                )
+                shuffled_scores = shuffled_scores * candidate_mask.to(
+                    shuffled_scores.dtype
+                )
+
+                valid_float = candidate_mask.to(edge_scores.dtype)
+                query_score_delta = (
+                    (edge_scores.detach() - shuffled_scores).abs() * valid_float
+                ).sum().div(valid_float.sum().clamp_min(1))
+                query_top1_change = self._compute_top1_change(
+                    edge_scores.detach(), shuffled_scores, candidate_mask
+                )
+                query_topk_overlap = self._compute_topk_overlap(
+                    edge_scores.detach(), shuffled_scores, candidate_mask
+                )
+
+        return {
+            "edge_score_min": edge_score_min,
+            "edge_score_max": edge_score_max,
+            "edge_score_range": edge_score_range,
+            "edge_top1_margin": edge_top1_margin,
+            "query_score_delta": query_score_delta,
+            "query_top1_change": query_top1_change,
+            "query_topk_overlap": query_topk_overlap,
+        }
+
+    def _compute_top1_margin(self, edge_scores, candidate_mask):
+        if edge_scores.shape[-1] < 2:
+            return edge_scores.new_tensor(0.0)
+        valid_source = candidate_mask.sum(dim=-1) >= 2
+        if not valid_source.any():
+            return edge_scores.new_tensor(0.0)
+        masked_scores = edge_scores.masked_fill(~candidate_mask, float("-inf"))
+        top2_scores = torch.topk(masked_scores, k=2, dim=-1).values
+        margins = top2_scores[..., 0] - top2_scores[..., 1]
+        return margins[valid_source].mean()
+
+    def _compute_top1_change(self, edge_scores, shuffled_scores, candidate_mask):
+        valid_source = candidate_mask.any(dim=-1)
+        if not valid_source.any():
+            return edge_scores.new_tensor(0.0)
+        real_top1 = edge_scores.masked_fill(~candidate_mask, float("-inf")).argmax(
+            dim=-1
+        )
+        shuffled_top1 = shuffled_scores.masked_fill(
+            ~candidate_mask, float("-inf")
+        ).argmax(dim=-1)
+        return (real_top1 != shuffled_top1)[valid_source].float().mean()
+
+    def _compute_topk_overlap(self, edge_scores, shuffled_scores, candidate_mask):
+        valid_source = candidate_mask.any(dim=-1)
+        if not valid_source.any():
+            return edge_scores.new_tensor(0.0)
+        real_topk = self._select_active_edges(
+            edge_scores, candidate_mask, hard_prune=True
+        )
+        shuffled_topk = self._select_active_edges(
+            shuffled_scores, candidate_mask, hard_prune=True
+        )
+        keep_num = min(self.effective_k, edge_scores.shape[-1])
+        denom = candidate_mask.sum(dim=-1).clamp(max=keep_num).clamp_min(1)
+        overlap = (real_topk & shuffled_topk).sum(dim=-1).to(edge_scores.dtype)
+        overlap = overlap / denom.to(edge_scores.dtype)
+        return overlap[valid_source].mean()
 
     def _build_graph_node_mask(self, scene_locs, scene_mask):
         """筛选真正可以参与图构建的节点。

@@ -115,6 +115,13 @@ def train(
         "graph_active_edges",
         "graph_edge_score",
         "graph_edge_score_std",
+        "graph_edge_score_min",
+        "graph_edge_score_max",
+        "graph_edge_score_range",
+        "graph_edge_top1_margin",
+        "graph_query_score_delta",
+        "graph_query_top1_change",
+        "graph_query_topk_overlap",
     ]
     media_types = get_media_types(train_loaders)
 
