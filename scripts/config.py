@@ -176,6 +176,9 @@ model = dict(
     sg_residual_scale=1.0,    # scale graph residual before adding to object tokens
     sg_use_query_gating=True, # False = fixed GNN ablation
     sg_diagnostics=True,      # log query sensitivity and edge ranking diagnostics
+    sg_aux_object_loss_weight=0.0, # target-aware object relevance auxiliary loss
+    sg_object_topm=0,         # 0 disables hard top-M residual masking
+    sg_use_object_gate=False, # gate graph residuals with query-object relevance
 
     # ===== 模块开关 =====
     add_scene_token=False,    # SGR使用场景图替代原Transformer场景token

@@ -104,6 +104,16 @@ def train(
     metric_logger.add_meter("lr", SmoothedValue(window=1, fmt="{value:.6f}"))
     loss_names = [
         "loss",
+        "lm_loss",
+        "graph_aux_loss",
+        "graph_object_loss",
+        "graph_object_target_count",
+        "graph_object_target_rank",
+        "graph_object_top1_acc",
+        "graph_object_top5_acc",
+        "graph_object_top10_acc",
+        "graph_object_topm_recall",
+        "graph_object_gate",
         "obj_norm",
         "obj_img_norm",
         "objid_norm",

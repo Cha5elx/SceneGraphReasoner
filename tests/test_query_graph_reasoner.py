@@ -136,3 +136,32 @@ def test_fixed_gnn_ablation_uses_uniform_candidate_scores():
     )
     assert torch.isclose(graph_info["mean_edge_score"], torch.tensor(1.0))
     assert torch.isclose(graph_info["edge_score_std"], torch.tensor(0.0))
+
+
+def test_target_object_auxiliary_loss_reports_rank_metrics():
+    reasoner = QueryGraphReasoner(
+        feat_dim=8,
+        query_input_dim=12,
+        output_dim=16,
+        hidden_dim=8,
+        candidate_k=3,
+        effective_k=1,
+        object_topm=2,
+        use_object_gate=True,
+    )
+    target_obj_ids = torch.tensor([1, 2])
+    target_obj_mask = torch.tensor([True, False])
+
+    _, graph_info = reasoner(
+        *build_inputs(),
+        target_obj_ids=target_obj_ids,
+        target_obj_mask=target_obj_mask,
+    )
+
+    assert graph_info["object_loss"] > 0
+    assert torch.isclose(graph_info["object_target_count"], torch.tensor(1.0))
+    assert graph_info["object_target_rank"] >= 1
+    assert 0 <= graph_info["object_top1_acc"] <= 1
+    assert 0 <= graph_info["object_top5_acc"] <= 1
+    assert 0 <= graph_info["object_topm_recall"] <= 1
+    assert 0 <= graph_info["object_gate_mean"] <= 1

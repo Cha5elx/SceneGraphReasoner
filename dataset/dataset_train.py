@@ -62,7 +62,8 @@ class TrainDataset(BaseDataset):
         if self.attributes is not None and self.anno[index]['scene_id'] not in self.attributes:
             # print(f"{self.anno[index]['scene_id']} not in attribute file!")
             return self.__getitem__(random.randint(0, len(self.anno)-1))
-        if "obj_id" in self.anno[index]:
+        has_obj_id = "obj_id" in self.anno[index]
+        if has_obj_id:
             obj_id = int(self.anno[index]["obj_id"])
         else:
             obj_id = random.randint(0, self.max_obj_num - 1)
@@ -74,11 +75,11 @@ class TrainDataset(BaseDataset):
         scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids = self.get_anno(index)
         caption = update_caption(caption, assigned_ids)
         question = update_caption(question, assigned_ids)
-        return scene_feat, scene_img_feat, scene_mask, scene_locs, obj_id, assigned_ids, caption, question
+        return scene_feat, scene_img_feat, scene_mask, scene_locs, obj_id, has_obj_id, assigned_ids, caption, question
 
 
 def train_collate_fn(batch):
-    scene_feats, scene_img_feats, scene_masks, scene_locs, obj_ids, assigned_ids, captions, questions = zip(*batch)
+    scene_feats, scene_img_feats, scene_masks, scene_locs, obj_ids, obj_id_masks, assigned_ids, captions, questions = zip(*batch)
     batch_scene_feat = pad_sequence(scene_feats, batch_first=True)
     batch_scene_img_feat = pad_sequence(scene_img_feats, batch_first=True)
     batch_scene_mask = pad_sequence(scene_masks, batch_first=True).to(torch.bool)
@@ -88,6 +89,7 @@ def train_collate_fn(batch):
     # for i in range(batch_detach_mask.shape[0]):
     #     batch_detach_mask[i][:detach_masks[i].shape[0]] = detach_masks[i]
     obj_ids = torch.tensor(obj_ids)
+    obj_id_masks = torch.tensor(obj_id_masks, dtype=torch.bool)
     return {
         "scene_feat": batch_scene_feat,
         "scene_img_feat": batch_scene_img_feat,
@@ -96,6 +98,7 @@ def train_collate_fn(batch):
         "assigned_ids": batch_assigned_ids,
         # "detach_mask": batch_detach_mask,
         "obj_ids": obj_ids,
+        "obj_id_mask": obj_id_masks,
         "answers": captions,
         "questions": questions
         # "ref_captions": ref_captions,

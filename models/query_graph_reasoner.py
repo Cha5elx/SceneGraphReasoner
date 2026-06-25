@@ -82,6 +82,8 @@ class QueryGraphReasoner(nn.Module):
         residual_scale=1.0,
         use_query_gating=True,
         diagnostics=True,
+        object_topm=0,
+        use_object_gate=False,
     ):
         super().__init__()
         if candidate_k < 1:
@@ -96,6 +98,8 @@ class QueryGraphReasoner(nn.Module):
         self.residual_scale = float(residual_scale)
         self.use_query_gating = use_query_gating
         self.diagnostics = diagnostics
+        self.object_topm = int(object_topm)
+        self.use_object_gate = use_object_gate
 
         self.query_encoder = QueryEncoder(query_input_dim, hidden_dim)
         self.node_encoder = nn.Sequential(
@@ -115,6 +119,11 @@ class QueryGraphReasoner(nn.Module):
         )
         self.message_out = nn.Linear(hidden_dim, hidden_dim)
         self.node_norm = nn.LayerNorm(hidden_dim)
+        self.object_scorer = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
         self.residual_proj = nn.Linear(hidden_dim, output_dim)
         nn.init.zeros_(self.residual_proj.weight)
         nn.init.zeros_(self.residual_proj.bias)
@@ -127,6 +136,8 @@ class QueryGraphReasoner(nn.Module):
         query_token_embeds,
         query_token_mask,
         hard_prune=None,
+        target_obj_ids=None,
+        target_obj_mask=None,
     ):
         """执行一次 query-conditioned 图推理，并返回可加到物体特征上的残差。
 
@@ -253,6 +264,18 @@ class QueryGraphReasoner(nn.Module):
             refined_feats.dtype
         )
 
+        object_logits = self._score_objects(
+            refined_feats=refined_feats,
+            query_embed=query_embed,
+            graph_node_mask=graph_node_mask,
+        )
+        object_aux_info = self._compute_object_auxiliary(
+            object_logits=object_logits,
+            graph_node_mask=graph_node_mask,
+            target_obj_ids=target_obj_ids,
+            target_obj_mask=target_obj_mask,
+        )
+
         # 将 refined graph hidden feature 先 L2 归一化，再投回 output_dim。
         # residual_proj 在 __init__ 中零初始化，因此训练初始时 graph_residual 为 0，
         # 模型从 baseline 行为开始，逐渐学习如何使用图信息。
@@ -262,6 +285,17 @@ class QueryGraphReasoner(nn.Module):
         raw_graph_residual = raw_graph_residual * graph_node_mask.unsqueeze(-1).to(
             raw_graph_residual.dtype
         )
+        if self.use_object_gate:
+            object_gate = torch.sigmoid(object_logits).unsqueeze(-1)
+            raw_graph_residual = raw_graph_residual * object_gate
+        else:
+            object_gate = torch.ones_like(object_logits).unsqueeze(-1)
+
+        topm_mask = self._select_topm_objects(object_logits, graph_node_mask)
+        if topm_mask is not None:
+            raw_graph_residual = raw_graph_residual * topm_mask.unsqueeze(-1).to(
+                raw_graph_residual.dtype
+            )
 
         # residual_scale 控制图残差注入强度，run.sh 中通常设得较小以稳定训练。
         graph_residual = raw_graph_residual * self.residual_scale
@@ -330,6 +364,8 @@ class QueryGraphReasoner(nn.Module):
             "edge_weights": edge_weights,
             # 池化后的 query 表示: [B, H]。
             "query_embed": query_embed,
+            # query-object relevance logits: [B, N]，用于 target-aware auxiliary loss。
+            "object_logits": object_logits,
             # 缩放后 residual 的平均范数。
             "residual_norm": graph_residual.norm(dim=-1).mean(),
             # 缩放前 residual 的平均范数，用于观察 residual_scale 的影响。
@@ -350,11 +386,105 @@ class QueryGraphReasoner(nn.Module):
             "mean_edge_score": mean_edge_score,
             # 边分数标准差。
             "edge_score_std": edge_score_std,
+            # query-object residual gate 平均值。
+            "object_gate_mean": object_gate.squeeze(-1)[graph_node_mask].mean()
+            if graph_node_mask.any()
+            else graph_residual.new_tensor(0.0),
         }
         graph_info.update(edge_diagnostics)
+        graph_info.update(object_aux_info)
 
         # 返回给 Chat3D 的只有 graph_residual；graph_info 作为日志/可视化辅助信息。
         return graph_residual, graph_info
+
+    def _score_objects(self, refined_feats, query_embed, graph_node_mask):
+        """Score how relevant each graph node is to the current query."""
+        _, obj_num, _ = refined_feats.shape
+        query_feats = query_embed[:, None, :].expand(-1, obj_num, -1)
+        scorer_input = torch.cat([refined_feats, query_feats], dim=-1)
+        object_logits = self.object_scorer(scorer_input).squeeze(-1)
+        return object_logits.masked_fill(~graph_node_mask, -1e4)
+
+    def _select_topm_objects(self, object_logits, graph_node_mask):
+        """Optionally keep graph residuals only on top-M query-relevant nodes."""
+        if self.object_topm <= 0:
+            return None
+        keep_num = min(self.object_topm, object_logits.shape[-1])
+        masked_logits = object_logits.masked_fill(~graph_node_mask, float("-inf"))
+        top_indices = torch.topk(masked_logits, k=keep_num, dim=-1).indices
+        topm_mask = torch.zeros_like(graph_node_mask)
+        topm_mask.scatter_(dim=-1, index=top_indices, value=True)
+        return topm_mask & graph_node_mask
+
+    def _compute_object_auxiliary(
+        self,
+        object_logits,
+        graph_node_mask,
+        target_obj_ids,
+        target_obj_mask,
+    ):
+        """Compute target-aware object relevance supervision and diagnostics."""
+        zero = object_logits.new_tensor(0.0)
+        if target_obj_ids is None:
+            return {
+                "object_loss": zero,
+                "object_target_count": zero,
+                "object_target_rank": zero,
+                "object_top1_acc": zero,
+                "object_top5_acc": zero,
+                "object_top10_acc": zero,
+                "object_topm_recall": zero,
+            }
+
+        batch_size, obj_num = object_logits.shape
+        target_obj_ids = target_obj_ids.to(
+            device=object_logits.device, dtype=torch.long
+        )
+        if target_obj_mask is None:
+            target_obj_mask = torch.ones(
+                batch_size, dtype=torch.bool, device=object_logits.device
+            )
+        else:
+            target_obj_mask = target_obj_mask.to(
+                device=object_logits.device, dtype=torch.bool
+            )
+
+        in_range = (target_obj_ids >= 0) & (target_obj_ids < obj_num)
+        safe_target_ids = target_obj_ids.clamp(min=0, max=max(obj_num - 1, 0))
+        target_graph_valid = graph_node_mask.gather(
+            dim=1, index=safe_target_ids[:, None]
+        ).squeeze(1)
+        valid_target = target_obj_mask & in_range & target_graph_valid
+        target_count = valid_target.float().sum()
+        if not valid_target.any():
+            return {
+                "object_loss": zero,
+                "object_target_count": target_count,
+                "object_target_rank": zero,
+                "object_top1_acc": zero,
+                "object_top5_acc": zero,
+                "object_top10_acc": zero,
+                "object_topm_recall": zero,
+            }
+
+        valid_logits = object_logits[valid_target]
+        valid_ids = safe_target_ids[valid_target]
+        object_loss = F.cross_entropy(valid_logits, valid_ids)
+
+        target_logits = valid_logits.gather(dim=1, index=valid_ids[:, None])
+        target_rank = (valid_logits > target_logits).sum(dim=1).float() + 1.0
+        topm = self.object_topm if self.object_topm > 0 else obj_num
+        topm = min(topm, obj_num)
+
+        return {
+            "object_loss": object_loss,
+            "object_target_count": target_count,
+            "object_target_rank": target_rank.mean(),
+            "object_top1_acc": (target_rank <= 1).float().mean(),
+            "object_top5_acc": (target_rank <= min(5, obj_num)).float().mean(),
+            "object_top10_acc": (target_rank <= min(10, obj_num)).float().mean(),
+            "object_topm_recall": (target_rank <= topm).float().mean(),
+        }
 
     def _compute_edge_diagnostics(
         self,

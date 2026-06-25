@@ -66,6 +66,9 @@ sg_hard_prune_eval=${sg_hard_prune_eval:-False}
 sg_residual_scale=${sg_residual_scale:-0.1}
 sg_use_query_gating=${sg_use_query_gating:-True}
 sg_diagnostics=${sg_diagnostics:-True}
+sg_aux_object_loss_weight=${sg_aux_object_loss_weight:-0.0}
+sg_object_topm=${sg_object_topm:-0}
+sg_use_object_gate=${sg_use_object_gate:-False}
 seq_len_cap=${seq_len_cap:-1280}
 
 # ===== LoRA =====
@@ -170,6 +173,9 @@ ARGS=(
     model.sg_residual_scale "$sg_residual_scale"
     model.sg_use_query_gating "$sg_use_query_gating"
     model.sg_diagnostics "$sg_diagnostics"
+    model.sg_aux_object_loss_weight "$sg_aux_object_loss_weight"
+    model.sg_object_topm "$sg_object_topm"
+    model.sg_use_object_gate "$sg_use_object_gate"
     model.seq_len_cap "$seq_len_cap"
 )
 
