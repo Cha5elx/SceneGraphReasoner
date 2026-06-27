@@ -84,8 +84,19 @@ class Chat3D(nn.Module):
         self.sg_aux_object_loss_weight = getattr(config.model, 'sg_aux_object_loss_weight', 0.0)
         self.sg_object_topm = getattr(config.model, 'sg_object_topm', 0)
         self.sg_use_object_gate = getattr(config.model, 'sg_use_object_gate', False)
+        self.sg_selector_only = getattr(config.model, 'sg_selector_only', False)
         if self.train_graph_only and not self.use_scene_graph:
             raise ValueError("model.train_graph_only=True requires model.use_scene_graph=True")
+        if self.sg_selector_only:
+            if not self.train_graph_only:
+                raise ValueError("model.sg_selector_only=True requires model.train_graph_only=True")
+            if self.sg_residual_scale != 0:
+                raise ValueError("model.sg_selector_only=True requires model.sg_residual_scale=0")
+            if self.sg_aux_object_loss_weight <= 0:
+                raise ValueError(
+                    "model.sg_selector_only=True requires "
+                    "model.sg_aux_object_loss_weight>0"
+                )
 
         self.debug = config.debug
         if not self.debug:
@@ -376,10 +387,44 @@ class Chat3D(nn.Module):
             target_obj_ids=target_obj_ids,
             target_obj_mask=target_obj_mask,
         )
-        object_embed = torch.nn.functional.normalize(
-            object_embed + graph_residual, dim=-1
-        )
+        if self.sg_residual_scale != 0:
+            object_embed = torch.nn.functional.normalize(
+                object_embed + graph_residual, dim=-1
+            )
         return object_embed, graph_info
+
+    @staticmethod
+    def _get_graph_metrics(graph_info):
+        metric_keys = {
+            "graph_object_target_count": "object_target_count",
+            "graph_object_target_rank": "object_target_rank",
+            "graph_object_top1_acc": "object_top1_acc",
+            "graph_object_top5_acc": "object_top5_acc",
+            "graph_object_top10_acc": "object_top10_acc",
+            "graph_object_topm_recall": "object_topm_recall",
+            "graph_object_gate": "object_gate_mean",
+            "scene_norm": "residual_norm",
+            "raw_scene_norm": "raw_residual_norm",
+            "graph_residual_scale": "residual_scale",
+            "graph_nodes": "valid_node_count",
+            "graph_candidate_edges": "candidate_edge_count",
+            "graph_active_edges": "active_edge_count",
+            "graph_edge_score": "mean_edge_score",
+            "graph_edge_score_std": "edge_score_std",
+            "graph_edge_score_min": "edge_score_min",
+            "graph_edge_score_max": "edge_score_max",
+            "graph_edge_score_range": "edge_score_range",
+            "graph_edge_top1_margin": "edge_top1_margin",
+            "graph_query_score_delta": "query_score_delta",
+            "graph_query_top1_change": "query_top1_change",
+            "graph_query_topk_overlap": "query_topk_overlap",
+        }
+        if graph_info is None:
+            return {name: 0.0 for name in metric_keys}
+        return {
+            name: graph_info[key].detach().cpu()
+            for name, key in metric_keys.items()
+        }
 
     def encode_object_feat(self, feat, img_feat, locs):
         feat = torch.nn.functional.normalize(feat, dim=-1)
@@ -499,6 +544,18 @@ class Chat3D(nn.Module):
             target_obj_ids=obj_ids,
             target_obj_mask=obj_id_mask,
         )
+        if self.sg_selector_only:
+            graph_object_loss = graph_info["object_loss"]
+            graph_aux_loss = graph_object_loss * self.sg_aux_object_loss_weight
+            return dict(
+                loss=graph_aux_loss,
+                lm_loss=0.0,
+                graph_aux_loss=graph_aux_loss.detach().cpu(),
+                graph_object_loss=graph_object_loss.detach().cpu(),
+                **self._get_graph_metrics(graph_info),
+                max_seq_len=0,
+            )
+
         proj_object_embed = self.object_proj(object_embed)
         proj_object_img_embed = self.object_img_proj(object_img_embed)
         if self.add_pos_emb:
@@ -610,33 +667,47 @@ class Chat3D(nn.Module):
             lm_loss=outputs.loss.detach().cpu(),
             graph_aux_loss=graph_aux_loss.detach().cpu(),
             graph_object_loss=graph_object_loss.detach().cpu(),
-            graph_object_target_count=graph_info["object_target_count"].detach().cpu() if graph_info is not None else 0.,
-            graph_object_target_rank=graph_info["object_target_rank"].detach().cpu() if graph_info is not None else 0.,
-            graph_object_top1_acc=graph_info["object_top1_acc"].detach().cpu() if graph_info is not None else 0.,
-            graph_object_top5_acc=graph_info["object_top5_acc"].detach().cpu() if graph_info is not None else 0.,
-            graph_object_top10_acc=graph_info["object_top10_acc"].detach().cpu() if graph_info is not None else 0.,
-            graph_object_topm_recall=graph_info["object_topm_recall"].detach().cpu() if graph_info is not None else 0.,
-            graph_object_gate=graph_info["object_gate_mean"].detach().cpu() if graph_info is not None else 0.,
+            **self._get_graph_metrics(graph_info),
             obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
             obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
-            scene_norm=graph_info["residual_norm"].detach().cpu() if graph_info is not None else 0.,
-            raw_scene_norm=graph_info["raw_residual_norm"].detach().cpu() if graph_info is not None else 0.,
-            graph_residual_scale=graph_info["residual_scale"].detach().cpu() if graph_info is not None else 0.,
-            graph_nodes=graph_info["valid_node_count"].detach().cpu() if graph_info is not None else 0.,
-            graph_candidate_edges=graph_info["candidate_edge_count"].detach().cpu() if graph_info is not None else 0.,
-            graph_active_edges=graph_info["active_edge_count"].detach().cpu() if graph_info is not None else 0.,
-            graph_edge_score=graph_info["mean_edge_score"].detach().cpu() if graph_info is not None else 0.,
-            graph_edge_score_std=graph_info["edge_score_std"].detach().cpu() if graph_info is not None else 0.,
-            graph_edge_score_min=graph_info["edge_score_min"].detach().cpu() if graph_info is not None else 0.,
-            graph_edge_score_max=graph_info["edge_score_max"].detach().cpu() if graph_info is not None else 0.,
-            graph_edge_score_range=graph_info["edge_score_range"].detach().cpu() if graph_info is not None else 0.,
-            graph_edge_top1_margin=graph_info["edge_top1_margin"].detach().cpu() if graph_info is not None else 0.,
-            graph_query_score_delta=graph_info["query_score_delta"].detach().cpu() if graph_info is not None else 0.,
-            graph_query_top1_change=graph_info["query_top1_change"].detach().cpu() if graph_info is not None else 0.,
-            graph_query_topk_overlap=graph_info["query_topk_overlap"].detach().cpu() if graph_info is not None else 0.,
             max_seq_len=max_seq_len
         )
+
+    @torch.no_grad()
+    def evaluate_graph_selector(
+        self,
+        scene_feat,
+        scene_img_feat,
+        scene_locs,
+        scene_mask,
+        custom_prompt,
+        obj_ids,
+        assigned_ids,
+        obj_id_mask=None,
+        **kwargs,
+    ):
+        """Evaluate query-object ranking without running the LLM."""
+        object_embed, _ = self.encode_object_feat(
+            scene_feat, scene_img_feat, scene_locs
+        )
+        graph_queries = [
+            update_caption(custom_prompt[i], assigned_ids[i])
+            for i in range(object_embed.shape[0])
+        ]
+        query_token_embeds, query_token_mask = self.get_query_token_embeds(
+            graph_queries, device=object_embed.device
+        )
+        _, graph_info = self.query_graph_reasoner(
+            scene_feat=object_embed,
+            scene_locs=scene_locs,
+            scene_mask=scene_mask,
+            query_token_embeds=query_token_embeds,
+            query_token_mask=query_token_mask,
+            target_obj_ids=obj_ids,
+            target_obj_mask=obj_id_mask,
+        )
+        return graph_info
 
     def evaluate(self, scene_feat, scene_img_feat, scene_locs, scene_mask, custom_prompt, obj_ids, assigned_ids, is_eval=True, **kwargs):
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
@@ -721,6 +792,8 @@ class Chat3D(nn.Module):
         return output_texts
 
     def forward(self, **kwargs):
+        if kwargs.pop("selector_eval", False):
+            return self.evaluate_graph_selector(**kwargs)
         if "answers" in kwargs:
             return self.forward_train(**kwargs)
         if "custom_prompt" in kwargs:

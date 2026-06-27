@@ -253,7 +253,14 @@ def evaluate_all(
     model_without_ddp.llama_model.config.use_cache = True
     val_scores = {}
     for val_loader in val_loaders:
-        new_val_scores = evaluate(model, val_loader, epoch, global_step, device, config)
+        if getattr(config.model, "sg_selector_only", False):
+            new_val_scores = evaluate_selector(
+                model, val_loader, epoch, device, config
+            )
+        else:
+            new_val_scores = evaluate(
+                model, val_loader, epoch, global_step, device, config
+            )
         val_scores = {**val_scores, **new_val_scores}
     
     logger.info(f"[epoch={epoch}, global steps={global_step}] Val Results:")
@@ -263,6 +270,63 @@ def evaluate_all(
     model.train()
     model_without_ddp.llama_model.config.use_cache = False
     return val_scores
+
+
+def evaluate_selector(model, val_loader, epoch, device, config):
+    """Evaluate target-object ranking without running language generation."""
+    eval_name = val_loader.dataset.datasets[0].dataset_name
+    logger.info(f"Evaluating {eval_name} graph selector...")
+    if config.distributed:
+        val_loader.sampler.set_epoch(epoch)
+
+    stat_keys = (
+        "object_loss_sum",
+        "object_target_count",
+        "object_target_rank_sum",
+        "object_reciprocal_rank_sum",
+        "object_top1_count",
+        "object_top5_count",
+        "object_top10_count",
+        "object_top20_count",
+        "object_top30_count",
+    )
+    totals = torch.zeros(len(stat_keys), dtype=torch.float64, device=device)
+    logger.info(
+        f"selector batch-size={val_loader.batch_size} "
+        f"length(#batches)={len(val_loader)}"
+    )
+
+    for batch in tqdm(val_loader):
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                batch[key] = value.to(device)
+        if not batch["obj_id_mask"].any():
+            continue
+        with torch.no_grad():
+            graph_info = model(**batch, selector_eval=True)
+        for index, key in enumerate(stat_keys):
+            totals[index] += graph_info[key].detach().to(torch.float64)
+
+    if config.distributed:
+        dist.all_reduce(totals)
+
+    target_count = totals[1].item()
+    if target_count == 0:
+        logger.warning(f"No target object IDs found for selector eval: {eval_name}")
+        return {}
+
+    prefix = f"[{eval_name}-selector]"
+    return {
+        f"{prefix} CE": (totals[0] / target_count).item(),
+        f"{prefix} Target Rank": (totals[2] / target_count).item(),
+        f"{prefix} MRR": (totals[3] / target_count).item(),
+        f"{prefix} R@1": (totals[4] / target_count).item(),
+        f"{prefix} R@5": (totals[5] / target_count).item(),
+        f"{prefix} R@10": (totals[6] / target_count).item(),
+        f"{prefix} R@20": (totals[7] / target_count).item(),
+        f"{prefix} R@30": (totals[8] / target_count).item(),
+        f"{prefix} Count": target_count,
+    }
 
 
 def evaluate(

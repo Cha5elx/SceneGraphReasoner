@@ -161,7 +161,38 @@ def test_target_object_auxiliary_loss_reports_rank_metrics():
     assert graph_info["object_loss"] > 0
     assert torch.isclose(graph_info["object_target_count"], torch.tensor(1.0))
     assert graph_info["object_target_rank"] >= 1
+    assert torch.isclose(
+        graph_info["object_loss_sum"], graph_info["object_loss"]
+    )
+    assert torch.isclose(
+        graph_info["object_target_rank_sum"],
+        graph_info["object_target_rank"],
+    )
+    assert torch.isclose(
+        graph_info["object_reciprocal_rank_sum"],
+        graph_info["object_target_rank"].reciprocal(),
+    )
     assert 0 <= graph_info["object_top1_acc"] <= 1
     assert 0 <= graph_info["object_top5_acc"] <= 1
     assert 0 <= graph_info["object_topm_recall"] <= 1
     assert 0 <= graph_info["object_gate_mean"] <= 1
+
+
+def test_empty_target_batch_keeps_differentiable_zero_loss():
+    reasoner = QueryGraphReasoner(
+        feat_dim=8,
+        query_input_dim=12,
+        output_dim=16,
+        hidden_dim=8,
+        candidate_k=3,
+        effective_k=1,
+    )
+
+    _, graph_info = reasoner(
+        *build_inputs(),
+        target_obj_ids=torch.tensor([1, 2]),
+        target_obj_mask=torch.tensor([False, False]),
+    )
+
+    assert graph_info["object_loss"].requires_grad
+    assert torch.isclose(graph_info["object_loss"], torch.tensor(0.0))

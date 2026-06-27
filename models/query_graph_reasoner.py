@@ -424,17 +424,26 @@ class QueryGraphReasoner(nn.Module):
         target_obj_mask,
     ):
         """Compute target-aware object relevance supervision and diagnostics."""
-        zero = object_logits.new_tensor(0.0)
+        zero = object_logits.sum() * 0.0
+        empty_info = {
+            "object_loss": zero,
+            "object_loss_sum": zero,
+            "object_target_count": zero,
+            "object_target_rank": zero,
+            "object_target_rank_sum": zero,
+            "object_reciprocal_rank_sum": zero,
+            "object_top1_acc": zero,
+            "object_top5_acc": zero,
+            "object_top10_acc": zero,
+            "object_top1_count": zero,
+            "object_top5_count": zero,
+            "object_top10_count": zero,
+            "object_top20_count": zero,
+            "object_top30_count": zero,
+            "object_topm_recall": zero,
+        }
         if target_obj_ids is None:
-            return {
-                "object_loss": zero,
-                "object_target_count": zero,
-                "object_target_rank": zero,
-                "object_top1_acc": zero,
-                "object_top5_acc": zero,
-                "object_top10_acc": zero,
-                "object_topm_recall": zero,
-            }
+            return empty_info
 
         batch_size, obj_num = object_logits.shape
         target_obj_ids = target_obj_ids.to(
@@ -457,32 +466,39 @@ class QueryGraphReasoner(nn.Module):
         valid_target = target_obj_mask & in_range & target_graph_valid
         target_count = valid_target.float().sum()
         if not valid_target.any():
-            return {
-                "object_loss": zero,
-                "object_target_count": target_count,
-                "object_target_rank": zero,
-                "object_top1_acc": zero,
-                "object_top5_acc": zero,
-                "object_top10_acc": zero,
-                "object_topm_recall": zero,
-            }
+            empty_info["object_target_count"] = target_count
+            return empty_info
 
         valid_logits = object_logits[valid_target]
         valid_ids = safe_target_ids[valid_target]
         object_loss = F.cross_entropy(valid_logits, valid_ids)
+        object_loss_sum = F.cross_entropy(
+            valid_logits, valid_ids, reduction="sum"
+        )
 
         target_logits = valid_logits.gather(dim=1, index=valid_ids[:, None])
         target_rank = (valid_logits > target_logits).sum(dim=1).float() + 1.0
         topm = self.object_topm if self.object_topm > 0 else obj_num
         topm = min(topm, obj_num)
+        top1_count = (target_rank <= 1).float().sum()
+        top5_count = (target_rank <= min(5, obj_num)).float().sum()
+        top10_count = (target_rank <= min(10, obj_num)).float().sum()
 
         return {
             "object_loss": object_loss,
+            "object_loss_sum": object_loss_sum,
             "object_target_count": target_count,
             "object_target_rank": target_rank.mean(),
-            "object_top1_acc": (target_rank <= 1).float().mean(),
-            "object_top5_acc": (target_rank <= min(5, obj_num)).float().mean(),
-            "object_top10_acc": (target_rank <= min(10, obj_num)).float().mean(),
+            "object_target_rank_sum": target_rank.sum(),
+            "object_reciprocal_rank_sum": target_rank.reciprocal().sum(),
+            "object_top1_acc": top1_count / target_count,
+            "object_top5_acc": top5_count / target_count,
+            "object_top10_acc": top10_count / target_count,
+            "object_top1_count": top1_count,
+            "object_top5_count": top5_count,
+            "object_top10_count": top10_count,
+            "object_top20_count": (target_rank <= min(20, obj_num)).float().sum(),
+            "object_top30_count": (target_rank <= min(30, obj_num)).float().sum(),
             "object_topm_recall": (target_rank <= topm).float().mean(),
         }
 
