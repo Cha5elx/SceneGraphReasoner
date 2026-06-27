@@ -84,6 +84,7 @@ class Chat3D(nn.Module):
         self.sg_aux_object_loss_weight = getattr(config.model, 'sg_aux_object_loss_weight', 0.0)
         self.sg_object_topm = getattr(config.model, 'sg_object_topm', 0)
         self.sg_use_object_gate = getattr(config.model, 'sg_use_object_gate', False)
+        self.sg_object_temperature = getattr(config.model, 'sg_object_temperature', 5.0)
         self.sg_selector_only = getattr(config.model, 'sg_selector_only', False)
         if self.train_graph_only and not self.use_scene_graph:
             raise ValueError("model.train_graph_only=True requires model.use_scene_graph=True")
@@ -234,9 +235,10 @@ class Chat3D(nn.Module):
                 diagnostics=self.sg_diagnostics,
                 object_topm=self.sg_object_topm,
                 use_object_gate=self.sg_use_object_gate,
+                object_temperature=self.sg_object_temperature,
             )
             logger.info(
-                'QueryGraphReasoner initialized: candidate_k=%s, effective_k=%s, hidden_dim=%s, residual_scale=%s, use_query_gating=%s, aux_object_loss_weight=%s, object_topm=%s, use_object_gate=%s',
+                'QueryGraphReasoner initialized: candidate_k=%s, effective_k=%s, hidden_dim=%s, residual_scale=%s, use_query_gating=%s, aux_object_loss_weight=%s, object_topm=%s, use_object_gate=%s, object_temperature=%s',
                 self.sg_candidate_k,
                 self.sg_effective_k,
                 self.sg_hidden_dim,
@@ -245,6 +247,7 @@ class Chat3D(nn.Module):
                 self.sg_aux_object_loss_weight,
                 self.sg_object_topm,
                 self.sg_use_object_gate,
+                self.sg_object_temperature,
             )
         if not self.train_img_proj:
             for p in self.object_img_proj.parameters():
@@ -401,6 +404,10 @@ class Chat3D(nn.Module):
             "graph_object_top1_acc": "object_top1_acc",
             "graph_object_top5_acc": "object_top5_acc",
             "graph_object_top10_acc": "object_top10_acc",
+            "graph_object_query_score_delta": "object_query_score_delta",
+            "graph_object_query_top1_change": "object_query_top1_change",
+            "graph_object_shuffled_rank": "object_shuffled_target_rank",
+            "graph_object_shuffled_top10_acc": "object_shuffled_top10_acc",
             "graph_object_topm_recall": "object_topm_recall",
             "graph_object_gate": "object_gate_mean",
             "scene_norm": "residual_norm",

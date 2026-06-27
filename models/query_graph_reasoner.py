@@ -84,6 +84,7 @@ class QueryGraphReasoner(nn.Module):
         diagnostics=True,
         object_topm=0,
         use_object_gate=False,
+        object_temperature=5.0,
     ):
         super().__init__()
         if candidate_k < 1:
@@ -100,6 +101,9 @@ class QueryGraphReasoner(nn.Module):
         self.diagnostics = diagnostics
         self.object_topm = int(object_topm)
         self.use_object_gate = use_object_gate
+        self.object_temperature = float(object_temperature)
+        if self.object_temperature <= 0:
+            raise ValueError("object_temperature must be positive")
 
         self.query_encoder = QueryEncoder(query_input_dim, hidden_dim)
         self.node_encoder = nn.Sequential(
@@ -119,11 +123,8 @@ class QueryGraphReasoner(nn.Module):
         )
         self.message_out = nn.Linear(hidden_dim, hidden_dim)
         self.node_norm = nn.LayerNorm(hidden_dim)
-        self.object_scorer = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        self.object_key_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.query_key_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.residual_proj = nn.Linear(hidden_dim, output_dim)
         nn.init.zeros_(self.residual_proj.weight)
         nn.init.zeros_(self.residual_proj.bias)
@@ -175,6 +176,28 @@ class QueryGraphReasoner(nn.Module):
         # query_embed: [B, H]，每个 batch 样本一个 query 表示。
         query_embed = self.query_encoder(query_token_embeds, query_token_mask)
 
+        # 先于消息传递计算 query-object 对齐，避免辅助目标被 post-message MLP
+        # 通过场景偏置拟合，而没有真正影响查询条件图。
+        object_logits, object_keys, query_key = self._score_objects(
+            node_feats=node_feats,
+            query_embed=query_embed,
+            graph_node_mask=graph_node_mask,
+        )
+        object_aux_info = self._compute_object_auxiliary(
+            object_logits=object_logits,
+            graph_node_mask=graph_node_mask,
+            target_obj_ids=target_obj_ids,
+            target_obj_mask=target_obj_mask,
+        )
+        object_query_diagnostics = self._compute_object_query_diagnostics(
+            object_logits=object_logits,
+            object_keys=object_keys,
+            query_key=query_key,
+            graph_node_mask=graph_node_mask,
+            target_obj_ids=target_obj_ids,
+            target_obj_mask=target_obj_mask,
+        )
+
         # 基于物体中心点距离构造候选边。
         # target_indices: [B, N, K]，表示每个源节点的 K 个候选目标节点编号。
         # candidate_mask: [B, N, K]，标记该候选边是否真实有效，避免 topk 中的 inf 占位边参与计算。
@@ -213,10 +236,15 @@ class QueryGraphReasoner(nn.Module):
 
         # 正常 SGR 模式: edge_router 输出每条候选边的 logit，再经 sigmoid 得到 [0,1] 权重。
         if self.use_query_gating:
-            edge_scores = torch.sigmoid(self.edge_router(router_input).squeeze(-1))
-
-            # 将无效候选边的分数归零，确保 padding/无效几何边不会传递消息。
-            edge_scores = edge_scores * candidate_mask.to(edge_scores.dtype)
+            base_edge_scores = torch.sigmoid(
+                self.edge_router(router_input).squeeze(-1)
+            )
+            edge_scores = self._modulate_edges_with_object_relevance(
+                base_edge_scores=base_edge_scores,
+                object_logits=object_logits,
+                target_indices=target_indices,
+                candidate_mask=candidate_mask,
+            )
         else:
             # 消融实验模式: 不使用 query-aware gating，所有候选边统一权重为 1。
             # 这等价于固定几何邻接图上的普通 message passing。
@@ -262,18 +290,6 @@ class QueryGraphReasoner(nn.Module):
         # 无效图节点的 refined feature 清零，避免后续 residual_proj 为它们生成残差。
         refined_feats = refined_feats * graph_node_mask.unsqueeze(-1).to(
             refined_feats.dtype
-        )
-
-        object_logits = self._score_objects(
-            refined_feats=refined_feats,
-            query_embed=query_embed,
-            graph_node_mask=graph_node_mask,
-        )
-        object_aux_info = self._compute_object_auxiliary(
-            object_logits=object_logits,
-            graph_node_mask=graph_node_mask,
-            target_obj_ids=target_obj_ids,
-            target_obj_mask=target_obj_mask,
         )
 
         # 将 refined graph hidden feature 先 L2 归一化，再投回 output_dim。
@@ -343,6 +359,10 @@ class QueryGraphReasoner(nn.Module):
             neighbor_feats=neighbor_feats,
             edge_geometry=edge_geometry,
             query_embed=query_embed,
+            object_keys=object_keys,
+            query_key=query_key,
+            target_indices=target_indices,
+            graph_node_mask=graph_node_mask,
         )
 
         # graph_info 不参与主前向输出的 object feature 加法，主要用于:
@@ -393,17 +413,44 @@ class QueryGraphReasoner(nn.Module):
         }
         graph_info.update(edge_diagnostics)
         graph_info.update(object_aux_info)
+        graph_info.update(object_query_diagnostics)
 
         # 返回给 Chat3D 的只有 graph_residual；graph_info 作为日志/可视化辅助信息。
         return graph_residual, graph_info
 
-    def _score_objects(self, refined_feats, query_embed, graph_node_mask):
-        """Score how relevant each graph node is to the current query."""
-        _, obj_num, _ = refined_feats.shape
-        query_feats = query_embed[:, None, :].expand(-1, obj_num, -1)
-        scorer_input = torch.cat([refined_feats, query_feats], dim=-1)
-        object_logits = self.object_scorer(scorer_input).squeeze(-1)
+    def _score_objects(self, node_feats, query_embed, graph_node_mask):
+        """Score pre-message nodes by cosine similarity to the query."""
+        object_keys = F.normalize(self.object_key_proj(node_feats), dim=-1)
+        query_key = F.normalize(self.query_key_proj(query_embed), dim=-1)
+        object_logits = self.object_temperature * torch.einsum(
+            "bnh,bh->bn", object_keys, query_key
+        )
+        object_logits = object_logits.masked_fill(~graph_node_mask, -1e4)
+        return object_logits, object_keys, query_key
+
+    def _score_objects_from_keys(self, object_keys, query_key, graph_node_mask):
+        object_logits = self.object_temperature * torch.einsum(
+            "bnh,bh->bn", object_keys, query_key
+        )
         return object_logits.masked_fill(~graph_node_mask, -1e4)
+
+    def _modulate_edges_with_object_relevance(
+        self,
+        base_edge_scores,
+        object_logits,
+        target_indices,
+        candidate_mask,
+    ):
+        """Favor candidate edges whose destination is relevant to the query."""
+        target_logits = self._gather_neighbors(
+            object_logits.unsqueeze(-1), target_indices
+        ).squeeze(-1)
+        target_relevance = torch.sigmoid(target_logits)
+        return (
+            base_edge_scores
+            * target_relevance
+            * candidate_mask.to(base_edge_scores.dtype)
+        )
 
     def _select_topm_objects(self, object_logits, graph_node_mask):
         """Optionally keep graph residuals only on top-M query-relevant nodes."""
@@ -502,6 +549,78 @@ class QueryGraphReasoner(nn.Module):
             "object_topm_recall": (target_rank <= topm).float().mean(),
         }
 
+    def _compute_object_query_diagnostics(
+        self,
+        object_logits,
+        object_keys,
+        query_key,
+        graph_node_mask,
+        target_obj_ids,
+        target_obj_mask,
+    ):
+        """Measure whether object ranking changes when queries are shuffled."""
+        zero = object_logits.new_tensor(0.0)
+        empty_info = {
+            "object_query_score_delta": zero,
+            "object_query_top1_change": zero,
+            "object_shuffled_loss_sum": zero,
+            "object_shuffled_target_count": zero,
+            "object_shuffled_target_rank": zero,
+            "object_shuffled_target_rank_sum": zero,
+            "object_shuffled_reciprocal_rank_sum": zero,
+            "object_shuffled_top10_acc": zero,
+            "object_shuffled_top10_count": zero,
+        }
+        if not self.diagnostics:
+            return empty_info
+
+        with torch.no_grad():
+            shuffled_query_key = query_key.roll(shifts=1, dims=0)
+            shuffled_logits = self._score_objects_from_keys(
+                object_keys=object_keys,
+                query_key=shuffled_query_key,
+                graph_node_mask=graph_node_mask,
+            )
+            valid_float = graph_node_mask.to(object_logits.dtype)
+            score_delta = (
+                (object_logits.detach() - shuffled_logits).abs() * valid_float
+            ).sum().div(valid_float.sum().clamp_min(1))
+
+            valid_sample = graph_node_mask.any(dim=-1)
+            if valid_sample.any():
+                real_top1 = object_logits.detach().argmax(dim=-1)
+                shuffled_top1 = shuffled_logits.argmax(dim=-1)
+                top1_change = (
+                    real_top1[valid_sample] != shuffled_top1[valid_sample]
+                ).float().mean()
+            else:
+                top1_change = zero
+
+            shuffled_aux = self._compute_object_auxiliary(
+                object_logits=shuffled_logits,
+                graph_node_mask=graph_node_mask,
+                target_obj_ids=target_obj_ids,
+                target_obj_mask=target_obj_mask,
+            )
+
+        return {
+            "object_query_score_delta": score_delta,
+            "object_query_top1_change": top1_change,
+            "object_shuffled_loss_sum": shuffled_aux["object_loss_sum"],
+            "object_shuffled_target_count": shuffled_aux["object_target_count"],
+            "object_shuffled_target_rank": shuffled_aux["object_target_rank"],
+            "object_shuffled_target_rank_sum": shuffled_aux[
+                "object_target_rank_sum"
+            ],
+            "object_shuffled_reciprocal_rank_sum": shuffled_aux[
+                "object_reciprocal_rank_sum"
+            ],
+            "object_shuffled_top10_acc": shuffled_aux["object_top10_acc"],
+            "object_shuffled_top10_count": shuffled_aux[
+                "object_top10_count"
+            ],
+        }
+
     def _compute_edge_diagnostics(
         self,
         edge_scores,
@@ -510,6 +629,10 @@ class QueryGraphReasoner(nn.Module):
         neighbor_feats,
         edge_geometry,
         query_embed,
+        object_keys,
+        query_key,
+        target_indices,
+        graph_node_mask,
     ):
         zero = edge_scores.new_tensor(0.0)
         valid_count = candidate_mask.sum(dim=(1, 2)).to(edge_scores.dtype)
@@ -552,8 +675,16 @@ class QueryGraphReasoner(nn.Module):
                 shuffled_scores = torch.sigmoid(
                     self.edge_router(shuffled_router_input).squeeze(-1)
                 )
-                shuffled_scores = shuffled_scores * candidate_mask.to(
-                    shuffled_scores.dtype
+                shuffled_object_logits = self._score_objects_from_keys(
+                    object_keys=object_keys,
+                    query_key=query_key.roll(shifts=1, dims=0),
+                    graph_node_mask=graph_node_mask,
+                )
+                shuffled_scores = self._modulate_edges_with_object_relevance(
+                    base_edge_scores=shuffled_scores,
+                    object_logits=shuffled_object_logits,
+                    target_indices=target_indices,
+                    candidate_mask=candidate_mask,
                 )
 
                 valid_float = candidate_mask.to(edge_scores.dtype)

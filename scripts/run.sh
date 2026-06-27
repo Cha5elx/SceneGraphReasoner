@@ -69,6 +69,7 @@ sg_diagnostics=${sg_diagnostics:-True}
 sg_aux_object_loss_weight=${sg_aux_object_loss_weight:-0.0}
 sg_object_topm=${sg_object_topm:-0}
 sg_use_object_gate=${sg_use_object_gate:-False}
+sg_object_temperature=${sg_object_temperature:-5.0}
 sg_selector_only=${sg_selector_only:-False}
 seq_len_cap=${seq_len_cap:-1280}
 
@@ -177,6 +178,7 @@ ARGS=(
     model.sg_aux_object_loss_weight "$sg_aux_object_loss_weight"
     model.sg_object_topm "$sg_object_topm"
     model.sg_use_object_gate "$sg_use_object_gate"
+    model.sg_object_temperature "$sg_object_temperature"
     model.sg_selector_only "$sg_selector_only"
     model.seq_len_cap "$seq_len_cap"
 )

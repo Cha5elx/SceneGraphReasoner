@@ -138,6 +138,61 @@ def test_fixed_gnn_ablation_uses_uniform_candidate_scores():
     assert torch.isclose(graph_info["edge_score_std"], torch.tensor(0.0))
 
 
+def test_cosine_object_selector_prefers_aligned_node():
+    reasoner = QueryGraphReasoner(
+        feat_dim=4,
+        query_input_dim=4,
+        output_dim=4,
+        hidden_dim=4,
+        candidate_k=2,
+        effective_k=1,
+        object_temperature=5.0,
+    )
+    with torch.no_grad():
+        reasoner.object_key_proj.weight.copy_(torch.eye(4))
+        reasoner.query_key_proj.weight.copy_(torch.eye(4))
+
+    node_feats = torch.tensor(
+        [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]
+    )
+    query_embed = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    node_mask = torch.ones(1, 2, dtype=torch.bool)
+
+    logits, _, _ = reasoner._score_objects(
+        node_feats, query_embed, node_mask
+    )
+
+    assert torch.isclose(logits[0, 0], torch.tensor(5.0))
+    assert torch.isclose(logits[0, 1], torch.tensor(0.0))
+
+
+def test_object_relevance_modulates_destination_edges():
+    reasoner = QueryGraphReasoner(
+        feat_dim=4,
+        query_input_dim=4,
+        output_dim=4,
+        hidden_dim=4,
+        candidate_k=2,
+        effective_k=1,
+    )
+    base_scores = torch.ones(1, 1, 2)
+    object_logits = torch.tensor([[-2.0, 2.0, 0.0]])
+    target_indices = torch.tensor([[[0, 1]]])
+    candidate_mask = torch.ones(1, 1, 2, dtype=torch.bool)
+
+    edge_scores = reasoner._modulate_edges_with_object_relevance(
+        base_edge_scores=base_scores,
+        object_logits=object_logits,
+        target_indices=target_indices,
+        candidate_mask=candidate_mask,
+    )
+
+    assert edge_scores[0, 0, 1] > edge_scores[0, 0, 0]
+    assert torch.allclose(
+        edge_scores[0, 0], torch.sigmoid(torch.tensor([-2.0, 2.0]))
+    )
+
+
 def test_target_object_auxiliary_loss_reports_rank_metrics():
     reasoner = QueryGraphReasoner(
         feat_dim=8,
@@ -176,6 +231,32 @@ def test_target_object_auxiliary_loss_reports_rank_metrics():
     assert 0 <= graph_info["object_top5_acc"] <= 1
     assert 0 <= graph_info["object_topm_recall"] <= 1
     assert 0 <= graph_info["object_gate_mean"] <= 1
+    assert torch.isclose(
+        graph_info["object_shuffled_target_count"], torch.tensor(1.0)
+    )
+    assert 0 <= graph_info["object_query_top1_change"] <= 1
+
+
+def test_object_auxiliary_loss_trains_cosine_projections():
+    reasoner = QueryGraphReasoner(
+        feat_dim=8,
+        query_input_dim=12,
+        output_dim=16,
+        hidden_dim=8,
+        candidate_k=3,
+        effective_k=1,
+    )
+
+    _, graph_info = reasoner(
+        *build_inputs(),
+        target_obj_ids=torch.tensor([1, 2]),
+        target_obj_mask=torch.tensor([True, True]),
+    )
+    graph_info["object_loss"].backward()
+
+    assert reasoner.object_key_proj.weight.grad is not None
+    assert reasoner.query_key_proj.weight.grad is not None
+    assert reasoner.query_encoder.token_proj.weight.grad is not None
 
 
 def test_empty_target_batch_keeps_differentiable_zero_loss():

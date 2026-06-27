@@ -112,6 +112,10 @@ def train(
         "graph_object_top1_acc",
         "graph_object_top5_acc",
         "graph_object_top10_acc",
+        "graph_object_query_score_delta",
+        "graph_object_query_top1_change",
+        "graph_object_shuffled_rank",
+        "graph_object_shuffled_top10_acc",
         "graph_object_topm_recall",
         "graph_object_gate",
         "obj_norm",
@@ -289,6 +293,11 @@ def evaluate_selector(model, val_loader, epoch, device, config):
         "object_top10_count",
         "object_top20_count",
         "object_top30_count",
+        "object_shuffled_loss_sum",
+        "object_shuffled_target_count",
+        "object_shuffled_target_rank_sum",
+        "object_shuffled_reciprocal_rank_sum",
+        "object_shuffled_top10_count",
     )
     totals = torch.zeros(len(stat_keys), dtype=torch.float64, device=device)
     logger.info(
@@ -316,15 +325,27 @@ def evaluate_selector(model, val_loader, epoch, device, config):
         return {}
 
     prefix = f"[{eval_name}-selector]"
+    shuffled_target_count = max(totals[10].item(), 1.0)
+    real_r10 = (totals[6] / target_count).item()
+    shuffled_r10 = (totals[13] / shuffled_target_count).item()
     return {
         f"{prefix} CE": (totals[0] / target_count).item(),
         f"{prefix} Target Rank": (totals[2] / target_count).item(),
         f"{prefix} MRR": (totals[3] / target_count).item(),
         f"{prefix} R@1": (totals[4] / target_count).item(),
         f"{prefix} R@5": (totals[5] / target_count).item(),
-        f"{prefix} R@10": (totals[6] / target_count).item(),
+        f"{prefix} R@10": real_r10,
         f"{prefix} R@20": (totals[7] / target_count).item(),
         f"{prefix} R@30": (totals[8] / target_count).item(),
+        f"{prefix} Shuffled CE": (totals[9] / shuffled_target_count).item(),
+        f"{prefix} Shuffled Target Rank": (
+            totals[11] / shuffled_target_count
+        ).item(),
+        f"{prefix} Shuffled MRR": (
+            totals[12] / shuffled_target_count
+        ).item(),
+        f"{prefix} Shuffled R@10": shuffled_r10,
+        f"{prefix} R@10 Drop": real_r10 - shuffled_r10,
         f"{prefix} Count": target_count,
     }
 
