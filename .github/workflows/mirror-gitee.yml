@@ -1,0 +1,82 @@
+name: Mirror Gitee to GitHub
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GITEE_REPO: "cha5elx/ScaneGraphReasoner"   # 修改为你的仓库路径
+      GITEE_BRANCH: "master"                      # Gitee 源分支
+      GITHUB_BRANCH: "main"                       # GitHub 目标分支
+
+    steps:
+      - name: Checkout GitHub repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 1. 备份 workflows 文件夹
+      - name: Backup GitHub Actions workflows
+        run: |
+          mkdir -p /tmp/workflows-backup
+          if [ -d .github/workflows ]; then
+            cp -r .github/workflows /tmp/workflows-backup/
+            echo "Workflows backed up."
+          else
+            echo "No workflows to back up."
+          fi
+
+      # 2. 从 Gitee 拉取
+      - name: Fetch from Gitee
+        run: |
+          GITEE_URL="https://gitee.com/${GITEE_REPO}.git"
+          git remote add gitee ${GITEE_URL} || git remote set-url gitee ${GITEE_URL}
+          git fetch gitee ${GITEE_BRANCH} --tags --force
+          # 检查源分支是否存在
+          if ! git ls-remote --heads gitee ${GITEE_BRANCH} | grep -q ${GITEE_BRANCH}; then
+            echo "错误：Gitee 上不存在 ${GITEE_BRANCH} 分支，同步中断。"
+            exit 1
+          fi
+
+      # 3. 强制同步到 Gitee 内容
+      - name: Force sync from Gitee
+        run: |
+          git checkout ${GITHUB_BRANCH} 2>/dev/null || git checkout -b ${GITHUB_BRANCH}
+          git reset --hard gitee/${GITEE_BRANCH}
+          echo "仓库已重置为 Gitee/${GITEE_BRANCH} 的内容。"
+
+      # 4. 恢复备份的 workflows 目录
+      - name: Restore workflows
+        run: |
+          # 确保 .github/workflows 目录存在
+          mkdir -p .github/workflows
+          # 把备份的 workflows 复制回来（强制覆盖，确保包含 mirror 文件）
+          if [ -d /tmp/workflows-backup/workflows ]; then
+            cp -rf /tmp/workflows-backup/workflows/* .github/workflows/
+            echo "Workflows restored from backup."
+          else
+            echo "No backup found, skipping restore."
+          fi
+          # 强制添加 workflows 文件夹的内容（包括删除或新增）
+          git add .github/workflows/
+
+      # 5. 提交并强制推送（包含恢复的 workflows）
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 如果有任何变更（包括恢复的 workflows），创建一个提交
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync from Gitee and restore GitHub Actions workflows"
+          else
+            echo "No changes to commit (already up-to-date)."
+          fi
+
+          # 强制推送，覆盖远程分支
+          git push origin ${GITHUB_BRANCH} --force --tags
